@@ -70,7 +70,9 @@ local function SourceLine(s, full)
 	end
 	-- a vendor: what the item asks for, and the price
 	if s.need then parts[#parts + 1] = s.need end
-	if s.cost then parts[#parts + 1] = UI.Money(s.cost) end
+	if s.costText then parts[#parts + 1] = s.costText elseif s.cost then parts[#parts + 1] = UI.Money(s.cost) end
+	if s.limited then parts[#parts + 1] = "limited stock" end
+	if s.unsure then parts[#parts + 1] = UI.Colored(Call("UnsureMark") or "not confirmed", C.FAINT) end
 	if full then
 		if s.level then parts[#parts + 1] = "Lvl " .. s.level end
 		if s.prof and not text:find(s.prof, 1, true) then

@@ -31,11 +31,13 @@ WowUp: Install from URL, `https://github.com/m9/Lootomania-Forever`.
 
 - Item stats, crafting, enchants and bosses: the game client's own tables.
 - Drop, vendor and quest sources: [QuestieDB](https://github.com/Questie/QuestieDB).
+- Vendor currency costs and reputation requirements: [AllTheThings](https://github.com/ATTWoWAddon/AllTheThings).
 - Seen loot, vendor prices and quest rewards: collected in game by the addon.
 
 ## Credits
 
 Source data: [Questie](https://github.com/Questie/Questie) and QuestieDB.
+Vendor costs and requirements: AllTheThings (MIT License, Copyright (c) AllTheThings WoW Addon).
 
 ## License
 

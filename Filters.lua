@@ -311,7 +311,8 @@ ns.On("PLAYER_ENTERING_WORLD", ZoneChanged)
 -- Like UI.Picker, for long lists. choices: list of { value =, label = } or a function.
 -- opts: { rows = 12 (shown at once), up = false (open upwards), fixed = "label" (button text
 -- stays, the list is an "add" menu), keep = true (the list stays open after a pick and is
--- read again: a menu of switches) }
+-- read again: a menu of switches), right = true (the list lines up with the button's right
+-- edge), menuWidth = 120 }
 -- A choice may carry its own colour: { value =, label =, color = }.
 
 local openMenu
@@ -335,6 +336,8 @@ function F.ListPicker(parent, width, choices, onPick, opts)
 	menu:EnableMouse(true)
 	if opts.up then
 		menu:SetPoint("BOTTOMLEFT", b, "TOPLEFT", 0, 2)
+	elseif opts.right then
+		menu:SetPoint("TOPRIGHT", b, "BOTTOMRIGHT", 0, -2)
 	else
 		menu:SetPoint("TOPLEFT", b, "BOTTOMLEFT", 0, -2)
 	end
@@ -635,9 +638,12 @@ function F.Bar(parent)
 	-- which vendors count: gold, reputation, PvP rank, other currency
 	bar.vendors = F.ListPicker(bar, 74, VendorChoices, function(kind)
 		F.SetVendor(kind, not F.VendorShown(kind))
-	end, { fixed = "Vendors", keep = true, menuWidth = 170 })
-	if last then bar.vendors:SetPoint("LEFT", last, "RIGHT", 10, 0) else bar.vendors:SetPoint("TOPLEFT", 0, -24) end
-	UI.Tip(bar.vendors, "Vendors", { "Which vendors count as a source.", "Click a line to hide or show it." })
+	end, { fixed = "Vendors", keep = true, menuWidth = 170, right = true })
+	-- first row, left of Reset: the second row has no room beside the zone box
+	bar.vendors:SetHeight(20)
+	bar.vendors:SetPoint("RIGHT", bar.reset, "LEFT", -4, 0)
+	UI.Tip(bar.vendors, "Vendors", { "Which vendors count as a source.", "Click a line to hide or show it.",
+		"\"not confirmed\" on an item: that vendor's price or requirements are still being checked." })
 
 	bar.zone = F.SearchPicker(bar, 190, ZoneChoices, PickZone, { rows = 14 })
 	bar.zone:SetPoint("TOPRIGHT", 0, -24)

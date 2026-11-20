@@ -1203,27 +1203,67 @@ local function VendorItem(id)
 	}
 end
 
--- Fills a vendor source: vendor (type), label, need (what the item asks for), cost (copper).
+-- Shown where a vendor's data is not confirmed (Data.vendorDoubt, from build/vendors/rules.lua).
+Gear.UNSURE = "not confirmed"
+Gear.UNSURE_NOTE = "Vendor details are not confirmed yet. We are updating them."
+
+-- What one vendor asks for one item, where the build knows more than the item table
+-- (Data.vendorDeals, "npc:item" -> "faction^standing^cost^limited").
+-- { faction, standing, gold = copper, costText = "100 Tarnished Undermine Real", limited = true }, or nil.
+local function VendorDeal(npc, id)
+	local line = npc and Data.vendorDeals and Data.vendorDeals[npc .. ":" .. id]
+	if not line then return nil end
+	local faction, standing, cost, limited = line:match("^([^%^]*)%^([^%^]*)%^([^%^]*)%^([^%^]*)$")
+	local deal = { faction = faction ~= "" and faction or nil, standing = tonumber(standing), limited = limited == "1" or nil }
+	if cost and cost:sub(1, 1) == "g" then
+		deal.gold = tonumber(cost:sub(2))
+	elseif cost and cost ~= "" then
+		local parts = {}
+		for key, amount in cost:gmatch("([ci]%d+)x(%d+)") do
+			parts[#parts + 1] = amount .. " " .. (Data.vendorCostNames and Data.vendorCostNames[key] or key)
+		end
+		if #parts > 0 then deal.costText = table.concat(parts, ", ") end
+	end
+	return deal
+end
+
+-- Fills a vendor source: vendor (type), label, need (what the item asks for), cost (copper) or
+-- costText (a currency or items), limited (limited stock), unsure (true when this vendor's price
+-- or requirements are not confirmed).
 -- seen: the collector's price for this vendor, -1 when it was not gold.
-local function VendorDetails(source, id, seen)
+local function VendorDetails(source, id, seen, npc)
 	local info = VendorItem(id)
+	local deal = VendorDeal(npc, id)
 	local special = seen and seen < 0
 	local cost = seen and seen > 0 and seen or nil
+	local faction = deal and deal.faction or (info and info.faction)
+	local standing = deal and deal.faction and deal.standing or (info and info.standing)
+	local costText = not cost and deal and deal.costText or nil
 	local kind = "gold"
 	if info and info.pvp then
 		kind = "pvp"
 		local rank = info.pvp - 4
 		source.need = "Rank " .. (rank > 0 and rank or info.pvp)
-	elseif info and info.faction then
+	elseif faction then
 		kind = "rep"
-		local standing = info.standing and (_G["FACTION_STANDING_LABEL" .. (info.standing + 1)] or STANDING[info.standing])
-		source.need = standing and (info.faction .. ": " .. standing) or info.faction
-	elseif special or (info and not info.buy and not cost) then
+		local label = standing and (_G["FACTION_STANDING_LABEL" .. (standing + 1)] or STANDING[standing])
+		source.need = label and (faction .. ": " .. label) or faction
+	elseif special or costText or (info and not info.buy and not cost) then
 		kind = "currency"
 	end
 	-- the table's gold price holds for plain and reputation vendors; a PvP or currency vendor's price
 	-- is only shown when the collector saw it in gold
-	if not cost and not special and info and (kind == "gold" or kind == "rep") then cost = info.buy end
+	if not cost and not special and not costText then
+		if deal and deal.gold then cost = deal.gold
+		elseif info and (kind == "gold" or kind == "rep") then cost = info.buy end
+	end
+	source.costText, source.limited = costText, deal and deal.limited or nil
+	-- a vendor on the list of unconfirmed ones; 2: its gold price is known to be wrong
+	local doubt = npc and Data.vendorDoubt and Data.vendorDoubt[npc]
+	if doubt then
+		source.unsure = true
+		if doubt == 2 and not (seen and seen > 0) then cost = nil end
+	end
 	source.vendor, source.label, source.cost = kind, VENDOR_LABEL[kind], cost
 end
 
@@ -1397,7 +1437,7 @@ function Gear.Sources(id)
 					if npc then
 						local seen = ns.db and ns.db.collected and ns.db.collected.vendors and ns.db.collected.vendors[ref]
 						local source = { kind = "vendor", name = npc.name, npc = ref, side = npc.side }
-						VendorDetails(source, id, (seen and seen.items and seen.items[id]) or extra)
+						VendorDetails(source, id, (seen and seen.items and seen.items[id]) or extra, ref)
 						Place(source, npc.area, npc.inst, npc.spots)
 						source.text = Join(npc.name, source.zone)
 						out[#out + 1] = source
@@ -1488,8 +1528,19 @@ function Gear.SourceText(id)
 	if first.kind ~= "vendor" or not first.label then return first.text end
 	local parts = { first.label:lower():gsub("^pvp", "PvP") .. "" }
 	if first.need then parts[#parts + 1] = first.need end
-	if first.cost and ns.UI and ns.UI.Money then parts[#parts + 1] = ns.UI.Money(first.cost) end
+	if first.costText then parts[#parts + 1] = first.costText
+	elseif first.cost and ns.UI and ns.UI.Money then parts[#parts + 1] = ns.UI.Money(first.cost) end
+	if first.limited then parts[#parts + 1] = "limited stock" end
+	if first.unsure then parts[#parts + 1] = Gear.UNSURE end
 	return first.text .. " (" .. table.concat(parts, ", ") .. ")"
+end
+
+function Gear.UnsureMark() return Gear.UNSURE end
+
+-- True when the item's first source is a vendor whose data is not confirmed.
+function Gear.SourceUnsure(id)
+	local first = Gear.Sources(id)[1]
+	return first and first.unsure or false
 end
 
 -- Collected data changes what sources say.
