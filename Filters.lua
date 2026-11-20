@@ -220,7 +220,7 @@ local NO_SOURCE = { kind = "unknown" }
 local ENEMY = { Alliance = "Horde", Horde = "Alliance" }
 local SIDE = { Alliance = "A", Horde = "H" }
 
-local function SourcePass(s, entry, level, faction)
+local function SourcePass(s, entry, level, faction, anyZone)
 	local kind = s.kind or "unknown"
 	if st.kindOff[kind] then return false end
 	local inst = s.inst ~= nil or s.instMap ~= nil
@@ -236,7 +236,7 @@ local function SourcePass(s, entry, level, faction)
 		if cities and s.zone and cities[s.zone] then return false end
 		if s.side and SIDE[faction] and s.side ~= SIDE[faction] then return false end
 	end
-	if st.focusZone then
+	if st.focusZone and not anyZone then
 		local zone = st.zone
 		if zone and (s.zone == zone or s.inst == zone) then return true end
 		if st.map and s.spots then
@@ -250,8 +250,8 @@ local function SourcePass(s, entry, level, faction)
 end
 
 -- True when at least one source of the item passes. An item without a known source
--- counts as one source of kind "unknown".
-function F.Pass(entry, sources, ctx)
+-- counts as one source of kind "unknown". anyZone: the zone filter is left out.
+function F.Pass(entry, sources, ctx, anyZone)
 	if not st then
 		Compile()
 		if not st then return true end
@@ -259,9 +259,9 @@ function F.Pass(entry, sources, ctx)
 	if not st.any then return true end
 	if type(entry) ~= "table" then return true end
 	local level, faction = ctx and ctx.level, ctx and ctx.faction
-	if type(sources) ~= "table" or #sources == 0 then return SourcePass(NO_SOURCE, entry, level, faction) end
+	if type(sources) ~= "table" or #sources == 0 then return SourcePass(NO_SOURCE, entry, level, faction, anyZone) end
 	for i = 1, #sources do
-		if SourcePass(sources[i], entry, level, faction) then return true end
+		if SourcePass(sources[i], entry, level, faction, anyZone) then return true end
 	end
 	return false
 end

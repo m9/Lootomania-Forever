@@ -1,5 +1,11 @@
 # Changelog
 
+## 16001-0.1.4
+
+- Character frame: each slot has a button with a crown (best item equipped), an orange arrow (better item known) or a quiet arrow.
+- Character frame: upgrades come from every zone, whatever zone is picked in the Upgrades tab.
+- Rings and trinkets are each judged against their own item.
+
 ## 16001-0.1.3
 
 - Upgrades: with a zone picked, each item shows its rank for the slot after its name.
