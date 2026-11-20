@@ -124,13 +124,41 @@ function U.SpecLabel(class, spec)
 	return spec or ""
 end
 
--- Spec choices for a pick list.
-function U.SpecChoices(class)
+-- Spec choices for a pick list: the class's specs, custom ones included.
+-- after: { save = function(key), delete = function(key, baseKey or nil) }. With it the list can
+-- change custom specs: each one gets a pencil (edit) and a cross (delete, after a yes or no box)
+-- at the end of its row, and the list ends with "New spec...". after.save and after.delete say what
+-- the list should show afterwards.
+U.SPEC_NEW = "\1new"
+
+function U.SpecChoices(class, after)
 	local out = {}
+	local editor = after and ns.SpecEditor
 	for _, s in ipairs(List("Specs", class)) do
-		out[#out + 1] = { value = s.key, label = s.label or s.key }
+		local choice = { value = s.key, label = s.label or s.key }
+		if editor and s.custom then
+			-- the first one is drawn at the right end
+			choice.icons = {
+				{ texture = "Delete", tip = "Delete spec", danger = true, onClick = function()
+					editor.AskRemove(class, s.key, after.delete) -- asks first
+				end },
+				{ texture = "Edit", tip = "Edit spec", onClick = function()
+					editor.Open({ class = class, spec = s.key, onSave = after.save })
+				end },
+			}
+		end
+		out[#out + 1] = choice
 	end
+	if editor then out[#out + 1] = { value = U.SPEC_NEW, label = "New spec...", action = true, color = C.GOLD_SOFT } end
 	return out
+end
+
+-- Runs "New spec..." when that is what was picked in a spec list. True when it was.
+--   class, current: the list's class and the spec it shows; the new spec starts from that one.
+function U.SpecCommand(key, class, current, onSave)
+	if key ~= U.SPEC_NEW then return false end
+	ns.SpecEditor.Open({ class = class, spec = current, new = true, onSave = onSave })
+	return true
 end
 
 local function PlayerLevel()
@@ -189,7 +217,8 @@ function U.Overview(parent, width)
 	end
 	function o:Fill(best)
 		local slots = Slots()
-		local zoned = ns.Filters and ns.Filters.Get and ns.Filters.Get("focusZone")
+		-- any filter on: a preset, a hidden source kind or vendor type, a zone
+		local filtered = ns.Filters and ns.Filters.Active and ns.Filters.Active() > 0
 		for i, slot in ipairs(slots) do
 			local row = self.rows[i]
 			if not row then
@@ -203,8 +232,8 @@ function U.Overview(parent, width)
 				row.icon:SetItem(entry.link or entry.id, entry.quality)
 				row.icon:Show()
 				local name = UI.Colored(ItemName(entry), entry.quality and UI.QUALITY[entry.quality] or C.TEXT)
-				-- with a zone picked the best item of the zone is rarely the best of the slot: say where it stands
-				if zoned and entry.rank then name = name .. " " .. UI.Colored("#" .. entry.rank, C.MUTED) end
+				-- with filters on, the best item left is rarely the best of the slot: say where it stands
+				if filtered and entry.rank then name = name .. " " .. UI.Colored("#" .. entry.rank, C.MUTED) end
 				UI.Color(row.name, C.TEXT)
 				row.name:SetText(name)
 				row.delta:SetText(DeltaText(entry))
@@ -578,9 +607,22 @@ local function Build(panel)
 		local ctx = Call("PlayerContext")
 		return type(ctx) == "table" and ctx.class or (ns.player and ns.player.class)
 	end
-	view.spec = UI.Picker(panel, 160, function() return U.SpecChoices(playerClass()) end, function(key)
-		Call("SetSpec", key)
+	local function playerSpec()
+		local ctx = Call("PlayerContext")
+		return type(ctx) == "table" and ctx.spec or nil
+	end
+	local function pick(key)
+		if key then Call("SetSpec", key) end
 		U.Refresh()
+	end
+	local after = {
+		save = pick, -- a saved spec becomes the one in use
+		-- the spec in use was deleted: back to its base; another one: nothing changes
+		delete = function(key, base) pick(view.spec:GetValue() == key and base or nil) end,
+	}
+	view.spec = UI.Picker(panel, 170, function() return U.SpecChoices(playerClass(), after) end, function(key)
+		if U.SpecCommand(key, playerClass(), playerSpec(), pick) then return end
+		pick(key)
 	end)
 	view.spec:SetPoint("TOPLEFT", 0, 0)
 	UI.Tip(view.spec, "Spec")
