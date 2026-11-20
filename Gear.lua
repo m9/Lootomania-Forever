@@ -298,19 +298,64 @@ function Gear.Specs(class)
 	return out
 end
 
--- Talent tab with the most points -> spec key. Nil when no points are spent.
+-- Talent tree with the most points -> spec key. Nil when no points are spent or nothing can be read.
+--
+-- Forever has one specialization per class and the three old talent trees as groups of one
+-- trait tree, so the tree with the most points is read from the trait API, the way the game's
+-- own talent window fills its three headers. The groups' order is the old tab order
+-- (Data.talentSpecs). GetTalentTabInfo is kept for clients that still have it.
+local function TraitPoints()
+	if not C_Traits or not C_Traits.GetGroupDisplayInfoByTreeID or not C_Traits.GetGroupCurrencyInfo or not C_Traits.GetConfigInfo then return nil end
+	local config
+	if C_SpecializationInfo and C_SpecializationInfo.GetCombatConfigIDForSpecGroup and C_SpecializationInfo.GetActiveSpecGroup then
+		config = C_SpecializationInfo.GetCombatConfigIDForSpecGroup(C_SpecializationInfo.GetActiveSpecGroup())
+	end
+	if not config and C_ClassTalents and C_ClassTalents.GetActiveConfigID then config = C_ClassTalents.GetActiveConfigID() end
+	if type(config) ~= "number" then return nil end
+	local info = C_Traits.GetConfigInfo(config)
+	local tree = type(info) == "table" and type(info.treeIDs) == "table" and info.treeIDs[1]
+	if not tree then return nil end
+	local groups = C_Traits.GetGroupDisplayInfoByTreeID(tree)
+	if type(groups) ~= "table" or #groups == 0 then return nil end
+	local ids, tabOf = {}, {}
+	for i, group in ipairs(groups) do
+		ids[i] = group.groupID
+		tabOf[group.groupID] = (type(group.orderIndex) == "number" and group.orderIndex or i - 1) + 1
+	end
+	local points = {} -- tab -> points spent
+	for _, spent in ipairs(C_Traits.GetGroupCurrencyInfo(config, ids) or {}) do
+		local tab = tabOf[spent.traitNodeGroupID]
+		local currency = type(spent.currencyInfos) == "table" and spent.currencyInfos[1]
+		local n = currency and ns.Plain(currency.spent)
+		if tab and type(n) == "number" then points[tab] = n end
+	end
+	return points
+end
+
+local function TabPoints()
+	local ok, points = pcall(TraitPoints)
+	if ok and points then return points end
+	if not GetTalentTabInfo then return nil end
+	points = {}
+	for tab = 1, 3 do
+		local ok2, a, _, c, d, e = pcall(GetTalentTabInfo, tab)
+		if ok2 then
+			-- points spent moved between returns over the years: take the number that fits
+			local n = (type(e) == "number" and e) or (type(c) == "number" and c) or (type(d) == "number" and d) or 0
+			if type(a) == "number" and type(c) == "string" and type(e) == "number" then n = e end
+			points[tab] = n
+		end
+	end
+	return points
+end
+
 local function TalentSpec(class)
 	local tabs = Data.talentSpecs and Data.talentSpecs[class]
-	if not tabs or not GetTalentTabInfo then return nil end
+	local points = tabs and TabPoints()
+	if not points then return nil end
 	local best, bestPoints = nil, 0
-	for tab = 1, 3 do
-		local ok, a, b, c, d, e = pcall(GetTalentTabInfo, tab)
-		if ok then
-			-- points spent moved between returns over the years: take the number that fits
-			local points = (type(e) == "number" and e) or (type(c) == "number" and c) or (type(d) == "number" and d) or 0
-			if type(a) == "number" and type(c) == "string" and type(e) == "number" then points = e end
-			if points > bestPoints then best, bestPoints = tabs[tab], points end
-		end
+	for tab = 1, #tabs do
+		if (points[tab] or 0) > bestPoints then best, bestPoints = tabs[tab], points[tab] end
 	end
 	return best
 end
@@ -1559,6 +1604,15 @@ end)
 ns.On("PLAYER_EQUIPMENT_CHANGED", gearChanged)
 ns.On("PLAYER_LEVEL_UP", function() C_Timer.After(0.5, ContextChanged) end)
 ns.On("CHARACTER_POINTS_CHANGED", ns.Debounce(1, ContextChanged))
+-- talents: points spent, another build loaded, the other spec activated. At login the talents
+-- come after the addon, so the first of these also sets the spec right.
+do
+	local changed = ns.Debounce(0.5, ContextChanged)
+	for _, event in ipairs({ "TRAIT_CONFIG_UPDATED", "TRAIT_CONFIG_LIST_UPDATED", "PLAYER_TALENT_UPDATE", "ACTIVE_COMBAT_CONFIG_CHANGED",
+		"ACTIVE_TALENT_GROUP_CHANGED" }) do
+		ns.On(event, changed)
+	end
+end
 ns.Listen("FILTERS_CHANGED", Wipe)
 ns.Listen("HUNTS_CHANGED", Wipe)
 
