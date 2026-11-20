@@ -1,5 +1,11 @@
 # Changelog
 
+## 16001-0.1.7
+
+- Custom specs: the editor is a pop-up, opened from the spec list with "New spec...". Each custom spec has edit and delete icons in the list.
+- Custom specs can be made from the Upgrades tab too. The Simulator shows the slot list at full width.
+- The slot rank after the item name shows with any filter on, not only a zone.
+
 ## 16001-0.1.6
 
 - Vendor items show what the vendor really asks: currency costs such as Tarnished Undermine Real, items handed in, and the reputation needed. Data from AllTheThings.

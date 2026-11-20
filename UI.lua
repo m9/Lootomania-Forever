@@ -1,4 +1,4 @@
-local _, ns = ...
+local ADDON, ns = ...
 
 -- Shared look: black and gold. Every window and row in the addon is built from these.
 
@@ -341,7 +341,34 @@ end
 
 -- Pick list: a button that opens a list of choices.
 -- choices: list of { value = , label = } or a function that returns one. onPick(value).
+-- A choice may have color = and action = true (picked like a command: the button keeps its value).
+-- A choice may have icons: small buttons at the right end of its row, each
+--   { texture = "Edit" (a file in Media/), tip = "Edit", onClick = function() end, danger = true (red on hover) }
 local openMenu
+UI.MEDIA = "Interface\\AddOns\\" .. ADDON .. "\\Media\\"
+
+local function RowIcon(row, n)
+	local icon = CreateFrame("Button", nil, row)
+	icon:SetSize(14, 14)
+	icon:SetPoint("RIGHT", -4 - (n - 1) * 18, 0)
+	icon.art = icon:CreateTexture(nil, "ARTWORK")
+	icon.art:SetAllPoints()
+	function icon:Paint()
+		local c = self.over and (self.spec.danger and C.RED or C.GOLD) or C.GOLD_DIM
+		self.art:SetVertexColor(c[1], c[2], c[3], 1)
+	end
+	icon:SetScript("OnEnter", function(self)
+		self.over = true
+		self:Paint()
+		UI.TextTooltip(self, self.spec.tip or "")
+	end)
+	icon:SetScript("OnLeave", function(self)
+		self.over = false
+		self:Paint()
+		UI.HideTooltip()
+	end)
+	return icon
+end
 function UI.Picker(parent, width, choices, onPick)
 	local b = UI.Button(parent, "", width or 140, 22)
 	b.label:ClearAllPoints()
@@ -392,10 +419,32 @@ function UI.Picker(parent, width, choices, onPick)
 				menu.rows[i] = row
 			end
 			row.text:SetText(choice.label)
-			UI.Color(row.text, choice.value == self.value and C.GOLD or C.TEXT)
+			UI.Color(row.text, choice.color or (choice.value == self.value and C.GOLD or C.TEXT))
+			row.icons = row.icons or {}
+			for n, spec in ipairs(choice.icons or {}) do
+				local icon = row.icons[n] or RowIcon(row, n)
+				row.icons[n] = icon
+				icon.spec = spec
+				icon.art:SetTexture(UI.MEDIA .. spec.texture)
+				icon:Paint()
+				icon:SetScript("OnClick", function()
+					menu:Hide()
+					UI.HideTooltip()
+					if spec.onClick then spec.onClick() end
+				end)
+				icon:Show()
+			end
+			for n = #(choice.icons or {}) + 1, #row.icons do row.icons[n]:Hide() end
+			-- the text stops before the icons
+			row.text:ClearAllPoints()
+			row.text:SetPoint("LEFT", 8, 0)
+			row.text:SetPoint("RIGHT", -(4 + #(choice.icons or {}) * 18), 0)
+			row.text:SetJustifyH("LEFT")
+			if row.text.SetWordWrap then row.text:SetWordWrap(false) end
 			row:SetScript("OnClick", function()
 				menu:Hide()
-				b:SetValue(choice.value)
+				-- an action ("New spec...") does something; it is not a value the button shows
+				if not choice.action then b:SetValue(choice.value) end
 				if onPick then onPick(choice.value) end
 			end)
 			row:Show()
