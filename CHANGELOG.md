@@ -1,5 +1,9 @@
 # Changelog
 
+## 16001-0.1.2
+
+- Zone filter: one search box in place of the Zone button and list. "Anywhere", "Current zone", then all zones by name. Type to search.
+
 ## 16001-0.1.1
 
 - The spec is read from your talents: the tree with the most points. Before, a new install started on the first spec of the class.

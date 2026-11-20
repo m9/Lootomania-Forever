@@ -23,7 +23,8 @@ F.PRESETS = {
 	{ key = "nearLevel", label = "Near my level", tip = "Hide quests and dungeons over 4 levels above me." },
 	{ key = "noCraftBop", label = "No crafted BoP", tip = "Hide crafted items that bind on pickup." },
 	{ key = "noEnemyCity", label = "No enemy cities", tip = "Hide sources in enemy cities." },
-	{ key = "focusZone", label = "Zone", tip = "Only sources in one zone." },
+	-- no chip of its own: the zone box sets it ("Anywhere" is off)
+	{ key = "focusZone", label = "Zone", tip = "Only sources in one zone.", hidden = true },
 }
 
 -- Turning one on turns these off.
@@ -365,15 +366,189 @@ function F.ListPicker(parent, width, choices, onPick, opts)
 	return b
 end
 
+-- Pick list with a search box -------------------------------------------------------------
+-- A text box with an arrow inside it. The box shows the picked choice; typing in it narrows the list.
+-- choices: list of { value =, label =, pin = true } or a function. Pinned choices come first,
+-- with a line under them. Enter picks the first match, Escape puts the picked label back.
+-- opts: { rows = 12 }
+
+local GAP = 7 -- room for the line under the pinned rows
+
+function F.SearchPicker(parent, width, choices, onPick, opts)
+	opts = opts or {}
+	local f = CreateFrame("Frame", nil, parent)
+	f:SetSize(width or 160, 22)
+	-- one box: the arrow sits inside its right end
+	local edit = UI.Edit(f, width or 160)
+	edit:SetPoint("LEFT")
+	edit:SetTextInsets(6, 22, 0, 0)
+	local arrow = CreateFrame("Button", nil, edit)
+	arrow:SetSize(20, 22)
+	arrow:SetPoint("RIGHT")
+	arrow.label = UI.Text(arrow, "GameFontNormalSmall", C.GOLD_DIM)
+	arrow.label:SetPoint("CENTER")
+	arrow.label:SetText("v")
+	arrow:SetScript("OnEnter", function(self) UI.Color(self.label, C.GOLD) end)
+	arrow:SetScript("OnLeave", function(self) UI.Color(self.label, C.GOLD_DIM) end)
+	f.edit, f.arrow = edit, arrow
+
+	local menu = CreateFrame("Frame", nil, f, "BackdropTemplate")
+	UI.Panel(menu, C.BLACK, 0.98, C.GOLD_DIM)
+	menu:SetFrameStrata("FULLSCREEN_DIALOG")
+	menu:EnableMouse(true)
+	menu:SetPoint("TOPLEFT", f, "BOTTOMLEFT", 0, -2)
+	menu:Hide()
+	local scroll = UI.Scroll(menu)
+	scroll:SetPoint("TOPLEFT", 1, -1)
+	scroll:SetPoint("BOTTOMRIGHT", -13, 1)
+	local line = UI.Fill(scroll.content, "ARTWORK", C.GOLD_DIM, 0.8)
+	line:SetHeight(1)
+	local none = UI.Text(scroll.content, "GameFontHighlightSmall", C.FAINT)
+	none:SetPoint("TOPLEFT", 8, -4)
+	none:SetText("No match")
+	local pool = UI.Pool(function()
+		local row = CreateFrame("Button", nil, scroll.content)
+		row:SetHeight(ROW)
+		row.hi = UI.Fill(row, "BACKGROUND", C.LINE, 0.7)
+		row.hi:SetAllPoints()
+		row.hi:Hide()
+		row.text = UI.Text(row, "GameFontHighlightSmall", C.TEXT)
+		row.text:SetPoint("LEFT", 8, 0)
+		row:SetScript("OnEnter", function(r) r.hi:Show() end)
+		row:SetScript("OnLeave", function(r) r.hi:Hide() end)
+		return row
+	end)
+
+	local function list() return (type(choices) == "function" and choices() or choices) or {} end
+	local function labelOf(value)
+		for _, choice in ipairs(list()) do
+			if choice.value == value then return choice.label end
+		end
+		return value ~= nil and tostring(value) or ""
+	end
+	local function pick(choice)
+		f.value = choice.value
+		menu:Hide()
+		edit:SetText(choice.label)
+		edit:ClearFocus()
+		if onPick then onPick(choice.value) end
+	end
+
+	local shown = {} -- the choices in the list now, in order
+	-- query: text to look for; nil or "" shows every choice
+	local function fill(query)
+		query = query and query ~= "" and query:lower() or nil
+		wipe(shown)
+		local pinned = 0
+		for _, choice in ipairs(list()) do
+			if not query or choice.label:lower():find(query, 1, true) then
+				shown[#shown + 1] = choice
+				if choice.pin then pinned = pinned + 1 end
+			end
+		end
+		local split = pinned > 0 and pinned < #shown -- a line between the two groups
+		for i, choice in ipairs(shown) do
+			local row = pool:Get(i)
+			local y = (i - 1) * ROW + ((split and i > pinned) and GAP or 0)
+			row:ClearAllPoints()
+			row:SetPoint("TOPLEFT", 0, -y)
+			row:SetPoint("TOPRIGHT", 0, -y)
+			row.text:SetText(choice.label)
+			UI.Color(row.text, choice.value == f.value and C.GOLD or C.TEXT)
+			row:SetScript("OnClick", function() pick(choice) end)
+		end
+		pool:HideFrom(#shown + 1)
+		line:SetShown(split)
+		if split then
+			line:ClearAllPoints()
+			line:SetPoint("TOPLEFT", 6, -(pinned * ROW + 3))
+			line:SetPoint("TOPRIGHT", -6, -(pinned * ROW + 3))
+		end
+		none:SetShown(#shown == 0)
+		local height = math.max(1, #shown) * ROW + (split and GAP or 0)
+		scroll.content:SetHeight(height)
+		menu:SetSize(math.max(f:GetWidth(), 120), math.min(height, (opts.rows or 12) * ROW + (split and GAP or 0)) + 2)
+		scroll:ScrollTo(0)
+	end
+	local function open(query)
+		if openMenu and openMenu ~= menu then openMenu:Hide() end
+		openMenu = menu
+		fill(query)
+		menu:Show()
+	end
+
+	function f:SetChoices(new) choices = new end
+	function f:SetValue(value)
+		self.value = value
+		if not edit:HasFocus() then edit:SetText(labelOf(value)) end
+	end
+	function f:GetValue() return self.value end
+	-- For tests and key handling: the labels in the list now.
+	function f:Shown() return shown end
+	function f:Search(text)
+		edit:SetText(text or "")
+		open(text)
+	end
+
+	arrow:SetScript("OnClick", function()
+		if menu:IsShown() then
+			menu:Hide()
+			edit:ClearFocus()
+		else
+			open(nil)
+		end
+	end)
+	edit:SetScript("OnEditFocusGained", function(self)
+		self:HighlightText()
+		open(nil) -- the whole list until something is typed
+	end)
+	edit:SetScript("OnEditFocusLost", function(self)
+		self:HighlightText(0, 0)
+		self:SetText(labelOf(f.value))
+	end)
+	edit:SetScript("OnTextChanged", function(self, user)
+		if user then open(self:GetText()) end
+	end)
+	edit:SetScript("OnEnterPressed", function(self)
+		if menu:IsShown() and shown[1] then pick(shown[1]) else self:ClearFocus() end
+	end)
+	edit:SetScript("OnEscapePressed", function(self)
+		menu:Hide()
+		self:ClearFocus()
+	end)
+	f:HookScript("OnHide", function() menu:Hide() end)
+	f.menu = menu
+	return f
+end
+
 -- Bar -------------------------------------------------------------------------------------
 
 local bars = {}
-local HERE = "\1here" -- pick list value for "the zone I am in"
+local ANY = "\1any" -- zone box value for "no zone filter"
+local HERE = "\1here" -- zone box value for "the zone I am in"
 
+-- "Anywhere" and "Current zone", then every zone by name.
 local function ZoneChoices()
-	local out = { { value = HERE, label = "Current zone" } }
-	for _, zone in ipairs(F.Zones()) do out[#out + 1] = { value = zone, label = zone } end
+	local out = { { value = ANY, label = "Anywhere", pin = true }, { value = HERE, label = "Current zone", pin = true } }
+	local zones = {}
+	for i, zone in ipairs(F.Zones()) do zones[i] = zone end
+	table.sort(zones)
+	for _, zone in ipairs(zones) do out[#out + 1] = { value = zone, label = zone } end
 	return out
+end
+
+-- The zone box sets two things: whether the zone filter is on, and which zone.
+local function PickZone(value)
+	local f = Saved()
+	if not f then return end
+	f.on.focusZone = value ~= ANY and true or nil
+	if value ~= ANY then f.zone = value ~= HERE and value or nil end
+	Changed()
+end
+
+local function ZoneValue()
+	if not F.Get("focusZone") then return ANY end
+	return F.Zone() or HERE
 end
 
 local function Chip(parent, preset)
@@ -384,19 +559,17 @@ local function Chip(parent, preset)
 	return chip
 end
 
--- Two rows: presets, then source kinds and the focus zone. bar:Refresh() shows the saved state.
+-- Two rows: presets, then source kinds and the zone box. bar:Refresh() shows the saved state.
 function F.Bar(parent)
 	local bar = CreateFrame("Frame", nil, parent)
 	bar:SetHeight(46)
 	bar.chips, bar.checks = {}, {}
 
-	local last, zoneChip
+	local last
 	for _, preset in ipairs(F.PRESETS) do
-		local chip = Chip(bar, preset)
-		bar.chips[preset.key] = chip
-		if preset.key == "focusZone" then
-			zoneChip = chip
-		else
+		if not preset.hidden then
+			local chip = Chip(bar, preset)
+			bar.chips[preset.key] = chip
 			if last then chip:SetPoint("LEFT", last, "RIGHT", 4, 0) else chip:SetPoint("TOPLEFT", 0, 0) end
 			last = chip
 		end
@@ -415,16 +588,14 @@ function F.Bar(parent)
 		last = check
 	end
 
-	bar.zone = F.ListPicker(bar, 150, ZoneChoices, function(value)
-		F.SetZone(value ~= HERE and value or nil)
-	end, { rows = 14 })
+	bar.zone = F.SearchPicker(bar, 190, ZoneChoices, PickZone, { rows = 14 })
 	bar.zone:SetPoint("TOPRIGHT", 0, -24)
-	if zoneChip then zoneChip:SetPoint("RIGHT", bar.zone, "LEFT", -4, 0) end
+	UI.Tip(bar.zone.edit, "Zone", { "Only sources in one zone.", "Type to search." })
 
 	function bar:Refresh()
 		for key, chip in pairs(self.chips) do chip:SetOn(F.Get(key)) end
 		for kind, check in pairs(self.checks) do check:SetChecked(F.KindShown(kind)) end
-		self.zone:SetValue(F.Zone() or HERE)
+		self.zone:SetValue(ZoneValue())
 		self.reset:SetEnabled(F.Active() > 0)
 	end
 
