@@ -1,5 +1,9 @@
 # Changelog
 
+## 16001-0.1.3
+
+- Upgrades: with a zone picked, each item shows its rank for the slot after its name.
+
 ## 16001-0.1.2
 
 - Zone filter: one search box in place of the Zone button and list. "Anywhere", "Current zone", then all zones by name. Type to search.

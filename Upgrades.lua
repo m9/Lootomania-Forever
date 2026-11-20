@@ -185,6 +185,7 @@ function U.Overview(parent, width)
 	end
 	function o:Fill(best)
 		local slots = Slots()
+		local zoned = ns.Filters and ns.Filters.Get and ns.Filters.Get("focusZone")
 		for i, slot in ipairs(slots) do
 			local row = self.rows[i]
 			if not row then
@@ -197,8 +198,11 @@ function U.Overview(parent, width)
 			if type(entry) == "table" then
 				row.icon:SetItem(entry.link or entry.id, entry.quality)
 				row.icon:Show()
-				row.name:SetText(ItemName(entry))
-				UI.Color(row.name, entry.quality and UI.QUALITY[entry.quality] or C.TEXT)
+				local name = UI.Colored(ItemName(entry), entry.quality and UI.QUALITY[entry.quality] or C.TEXT)
+				-- with a zone picked the best item of the zone is rarely the best of the slot: say where it stands
+				if zoned and entry.rank then name = name .. " " .. UI.Colored("#" .. entry.rank, C.MUTED) end
+				UI.Color(row.name, C.TEXT)
+				row.name:SetText(name)
 				row.delta:SetText(DeltaText(entry))
 				row.source:SetText(entry.source and SourceLine(entry.source) or "")
 			else
