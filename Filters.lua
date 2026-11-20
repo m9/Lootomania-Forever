@@ -5,6 +5,7 @@ local _, ns = ...
 --     on    = { presetKey = true },   -- active presets
 --     kinds = { kind = false },       -- source kinds that are hidden
 --     zone  = "Zone name" or nil,     -- focus zone; nil: the zone the player is in
+--     vendors = { type = false },     -- vendor types that are hidden: gold, rep, pvp, currency
 --   }
 -- Gear.List asks ns.Filters.Pass for every candidate. Sends "FILTERS_CHANGED".
 
@@ -39,6 +40,10 @@ local KIND_LABEL = {
 	boss = "Boss", drop = "Drop", rare = "Rare", object = "Object", quest = "Quest", vendor = "Vendor",
 	craft = "Craft", world = "World", unknown = "Unknown",
 }
+
+-- Vendor types (Gear.VENDOR_TYPES), for the "Vendors" menu.
+F.VENDORS = { "gold", "rep", "pvp", "currency" }
+local VENDOR_LABEL = { gold = "Gold", rep = "Reputation", pvp = "PvP rank", currency = "Other currency" }
 
 local NEAR_LEVELS = 4
 
@@ -90,6 +95,7 @@ local function Saved()
 	if type(f) ~= "table" then return nil end
 	if type(f.on) ~= "table" then f.on = {} end
 	if type(f.kinds) ~= "table" then f.kinds = {} end
+	if type(f.vendors) ~= "table" then f.vendors = {} end
 	return f
 end
 
@@ -113,7 +119,13 @@ local function Compile()
 		st = nil
 		return
 	end
-	local new = { any = false, kindOff = {} }
+	local new = { any = false, kindOff = {}, vendorOff = {} }
+	for _, kind in ipairs(F.VENDORS) do
+		if f.vendors[kind] == false then
+			new.vendorOff[kind] = true
+			new.any = true
+		end
+	end
 	for _, kind in ipairs(F.KINDS) do
 		if f.kinds[kind] == false then
 			new.kindOff[kind] = true
@@ -169,6 +181,18 @@ function F.SetKind(kind, shown)
 	Changed()
 end
 
+function F.VendorShown(kind)
+	local f = Saved()
+	return not (f and f.vendors[kind] == false)
+end
+
+function F.SetVendor(kind, shown)
+	local f = Saved()
+	if not f then return end
+	if shown then f.vendors[kind] = nil else f.vendors[kind] = false end
+	Changed()
+end
+
 -- Focus zone by name; nil: the zone the player is in.
 function F.SetZone(zone)
 	local f = Saved()
@@ -185,7 +209,7 @@ end
 function F.Reset()
 	local f = Saved()
 	if not f then return end
-	f.on, f.kinds, f.zone = {}, {}, nil
+	f.on, f.kinds, f.vendors, f.zone = {}, {}, {}, nil
 	Changed()
 end
 
@@ -196,6 +220,9 @@ function F.Active()
 	if not f then return n end
 	for _ in pairs(f.on) do n = n + 1 end
 	for _, shown in pairs(f.kinds) do
+		if shown == false then n = n + 1 end
+	end
+	for _, shown in pairs(f.vendors) do
 		if shown == false then n = n + 1 end
 	end
 	return n
@@ -223,6 +250,7 @@ local SIDE = { Alliance = "A", Horde = "H" }
 local function SourcePass(s, entry, level, faction, anyZone)
 	local kind = s.kind or "unknown"
 	if st.kindOff[kind] then return false end
+	if kind == "vendor" and st.vendorOff[s.vendor or "gold"] then return false end
 	local inst = s.inst ~= nil or s.instMap ~= nil
 	local raid = inst and IsRaid(s)
 	if st.noDungeons and inst and not raid then return false end
@@ -282,7 +310,9 @@ ns.On("PLAYER_ENTERING_WORLD", ZoneChanged)
 -- Pick list that scrolls ------------------------------------------------------------------
 -- Like UI.Picker, for long lists. choices: list of { value =, label = } or a function.
 -- opts: { rows = 12 (shown at once), up = false (open upwards), fixed = "label" (button text
--- stays, the list is an "add" menu) }
+-- stays, the list is an "add" menu), keep = true (the list stays open after a pick and is
+-- read again: a menu of switches) }
+-- A choice may carry its own colour: { value =, label =, color = }.
 
 local openMenu
 local ROW = 20
@@ -340,24 +370,28 @@ function F.ListPicker(parent, width, choices, onPick, opts)
 		self:SetLabel(value ~= nil and tostring(value) or "")
 	end
 	function b:GetValue() return self.value end
-	b:SetScript("OnClick", function(self)
-		if menu:IsShown() then menu:Hide() return end
-		if openMenu and openMenu ~= menu then openMenu:Hide() end
-		openMenu = menu
+	local function fill()
 		local items = list()
 		for i, choice in ipairs(items) do
 			local row = pool:Get(i)
 			row.text:SetText(choice.label)
-			UI.Color(row.text, (not opts.fixed and choice.value == self.value) and C.GOLD or C.TEXT)
+			UI.Color(row.text, choice.color or ((not opts.fixed and choice.value == b.value) and C.GOLD or C.TEXT))
 			row:SetScript("OnClick", function()
-				menu:Hide()
+				if not opts.keep then menu:Hide() end
 				b:SetValue(choice.value)
 				if onPick then onPick(choice.value) end
+				if opts.keep and menu:IsShown() then fill() end
 			end)
 		end
 		pool:HideFrom(#items + 1)
 		scroll.content:SetHeight(math.max(1, #items * ROW))
-		menu:SetSize(math.max(self:GetWidth(), 120), math.max(1, math.min(#items, opts.rows or 12)) * ROW + 2)
+		menu:SetSize(math.max(b:GetWidth(), opts.menuWidth or 120), math.max(1, math.min(#items, opts.rows or 12)) * ROW + 2)
+	end
+	b:SetScript("OnClick", function()
+		if menu:IsShown() then menu:Hide() return end
+		if openMenu and openMenu ~= menu then openMenu:Hide() end
+		openMenu = menu
+		fill()
 		menu:Show()
 		scroll:ScrollTo(0)
 	end)
@@ -537,6 +571,16 @@ local function ZoneChoices()
 	return out
 end
 
+-- "Vendors" menu: one switch per vendor type. A hidden type is grey and says so.
+local function VendorChoices()
+	local out = {}
+	for i, kind in ipairs(F.VENDORS) do
+		local shown = F.VendorShown(kind)
+		out[i] = { value = kind, label = VENDOR_LABEL[kind] .. (shown and "" or ": hidden"), color = shown and C.TEXT or C.FAINT }
+	end
+	return out
+end
+
 -- The zone box sets two things: whether the zone filter is on, and which zone.
 local function PickZone(value)
 	local f = Saved()
@@ -559,7 +603,7 @@ local function Chip(parent, preset)
 	return chip
 end
 
--- Two rows: presets, then source kinds and the zone box. bar:Refresh() shows the saved state.
+-- Two rows: presets, then source kinds, the vendors menu and the zone box. bar:Refresh() shows the saved state.
 function F.Bar(parent)
 	local bar = CreateFrame("Frame", nil, parent)
 	bar:SetHeight(46)
@@ -588,6 +632,13 @@ function F.Bar(parent)
 		last = check
 	end
 
+	-- which vendors count: gold, reputation, PvP rank, other currency
+	bar.vendors = F.ListPicker(bar, 74, VendorChoices, function(kind)
+		F.SetVendor(kind, not F.VendorShown(kind))
+	end, { fixed = "Vendors", keep = true, menuWidth = 170 })
+	if last then bar.vendors:SetPoint("LEFT", last, "RIGHT", 10, 0) else bar.vendors:SetPoint("TOPLEFT", 0, -24) end
+	UI.Tip(bar.vendors, "Vendors", { "Which vendors count as a source.", "Click a line to hide or show it." })
+
 	bar.zone = F.SearchPicker(bar, 190, ZoneChoices, PickZone, { rows = 14 })
 	bar.zone:SetPoint("TOPRIGHT", 0, -24)
 	UI.Tip(bar.zone.edit, "Zone", { "Only sources in one zone.", "Type to search." })
@@ -595,6 +646,11 @@ function F.Bar(parent)
 	function bar:Refresh()
 		for key, chip in pairs(self.chips) do chip:SetOn(F.Get(key)) end
 		for kind, check in pairs(self.checks) do check:SetChecked(F.KindShown(kind)) end
+		local hidden = false
+		for _, kind in ipairs(F.VENDORS) do
+			if not F.VendorShown(kind) then hidden = true end
+		end
+		self.vendors:SetOn(hidden) -- lit when some vendors are left out
 		self.zone:SetValue(ZoneValue())
 		self.reset:SetEnabled(F.Active() > 0)
 	end

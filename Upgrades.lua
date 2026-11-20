@@ -59,7 +59,7 @@ end
 local function SourceLine(s, full)
 	if type(s) ~= "table" then return "" end
 	local text = s.text or s.name or "Unknown"
-	local kind = Call("KindLabel", s.kind)
+	local kind = s.label or Call("KindLabel", s.kind) -- a vendor's label says which kind of vendor
 	-- no label when the text has one ("Quest: ...", "In: ...") or is the label ("World drop")
 	if s.kind == "unknown" or text == kind or text:find("^%a[%a ]*: ") then kind = nil end
 	local parts = { (kind and kind ~= "" and (UI.Colored(kind .. ":", C.GOLD_SOFT) .. " ") or "") .. text }
@@ -68,9 +68,11 @@ local function SourceLine(s, full)
 	if s.zone and not text:find(s.zone, 1, true) and not (s.inst and text:find(s.inst, 1, true)) then
 		parts[#parts + 1] = s.zone
 	end
+	-- a vendor: what the item asks for, and the price
+	if s.need then parts[#parts + 1] = s.need end
+	if s.cost then parts[#parts + 1] = UI.Money(s.cost) end
 	if full then
 		if s.level then parts[#parts + 1] = "Lvl " .. s.level end
-		if s.cost then parts[#parts + 1] = UI.Money(s.cost) end
 		if s.prof and not text:find(s.prof, 1, true) then
 			parts[#parts + 1] = s.prof .. (s.skill and (" " .. s.skill) or "")
 		elseif s.skill and not text:find(tostring(s.skill), 1, true) then

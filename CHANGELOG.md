@@ -1,5 +1,10 @@
 # Changelog
 
+## 16001-0.1.5
+
+- Vendor items show the vendor type (vendor, reputation, PvP, currency), what the item asks for and the gold price.
+- New "Vendors" menu in the filters: hide gold, reputation, PvP rank or other currency vendors.
+
 ## 16001-0.1.4
 
 - Character frame: each slot has a button with a crown (best item equipped), an orange arrow (better item known) or a quiet arrow.
