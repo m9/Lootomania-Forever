@@ -1,5 +1,13 @@
 # Changelog
 
+## 16001-0.1.6
+
+- Vendor items show what the vendor really asks: currency costs such as Tarnished Undermine Real, items handed in, and the reputation needed. Data from AllTheThings.
+- Warsong Gulch rewards show the right faction and standing.
+- "limited stock" on items a vendor does not always have.
+- "not confirmed" marks vendors whose price or requirements are still being checked.
+- The Vendors filter button moved next to Reset.
+
 ## 16001-0.1.5
 
 - Vendor items show the vendor type (vendor, reputation, PvP, currency), what the item asks for and the gold price.

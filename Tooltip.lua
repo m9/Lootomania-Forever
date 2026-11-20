@@ -211,6 +211,10 @@ local function Build(link, short)
 	if db.tipSource and id then
 		local source = Gear.SourceText(id)
 		if source then last[#last + 1] = { Label("Source") .. source } end
+		-- a vendor whose price or requirements we have not confirmed: say so in small print
+		if source and Gear.SourceUnsure and Gear.SourceUnsure(id) then
+			last[#last + 1] = { UI.Colored(Gear.UNSURE_NOTE or "Vendor details are not confirmed yet.", C.FAINT), small = true }
+		end
 	end
 	if tracked then last[#last + 1] = { UI.Colored("Tracked", C.GOLD) } end
 	if #last > 0 then blocks[#blocks + 1] = last end
