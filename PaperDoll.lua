@@ -1,8 +1,13 @@
-local _, ns = ...
+local ADDON, ns = ...
 
--- Character frame: a small gold corner on every equipment slot. A click opens a popup with
--- the best upgrades for that slot. The corners are plain buttons laid over the slots; the
--- game's own slot buttons are not changed, so their clicks work as before.
+-- Character frame: a small button in the corner of every equipment slot. A click opens a
+-- popup with the best upgrades for that slot. The button shows where the slot stands:
+--   crown        the equipped item is rank 1 for the slot
+--   orange ">"   a better item is known
+--   quiet ">"    nothing better in the list
+-- Both the mark and the popup look at every zone: the zone picked in the Upgrades tab does not
+-- count here. The corners are plain buttons laid over the slots; the game's own slot buttons
+-- are not changed, so their clicks work as before.
 
 local UI = ns.UI
 local C = UI.C
@@ -29,7 +34,7 @@ local function Call(...) return ns.Upgrades.Call(...) end
 local function List(...) return ns.Upgrades.List(...) end
 
 local function Top(slot)
-	return List("List", slot, nil, { count = TOP })
+	return List("List", slot, nil, { count = TOP, anyZone = true })
 end
 
 -- Popup -----------------------------------------------------------------------------------------
@@ -131,26 +136,41 @@ local function Enabled()
 	return not ns.db or ns.db.paperDoll ~= false
 end
 
+local MEDIA = "Interface\\AddOns\\" .. ADDON .. "\\Media\\" -- drawn by build/media.lua
+local ORANGE = { 1.00, 0.55, 0.10 }
+local PAIRED = { Finger = true, Trinket = true } -- two frames, one list
+
 local function PaintCorner(corner)
-	local c = corner.better and C.GREEN or (corner.over and C.GOLD or C.GOLD_SOFT)
-	corner.fill:SetColorTexture(c[1], c[2], c[3], 1)
+	local best = corner.state == "best"
+	local c = best and C.GOLD or (corner.state == "better" and ORANGE or C.GOLD_DIM)
+	if corner.over and corner.state ~= "better" then c = C.GOLD end
+	corner.mark:SetTexture(MEDIA .. (best and "Crown" or "Chevron"))
+	corner.mark:SetVertexColor(c[1], c[2], c[3], 1)
+	corner.edge:SetColorTexture(c[1], c[2], c[3], corner.state and 1 or 0.6)
 end
 
 local function MakeCorner(slotFrame, slot)
 	local corner = CreateFrame("Button", nil, slotFrame)
 	corner.slot = slot
-	corner:SetSize(11, 11)
-	corner:SetPoint("TOPRIGHT", slotFrame, "TOPRIGHT", 0, 0)
+	corner.host = slotFrame
+	corner:SetSize(14, 14)
+	corner:SetPoint("TOPRIGHT", slotFrame, "TOPRIGHT", 1, 1)
 	corner:SetFrameLevel((slotFrame:GetFrameLevel() or 1) + 5)
-	corner.edge = UI.Fill(corner, "BACKGROUND", C.BLACK, 1)
+	-- "[>]": a dark box with a thin edge, the mark inside
+	corner.edge = UI.Fill(corner, "BACKGROUND", C.GOLD_DIM, 1)
 	corner.edge:SetAllPoints()
-	corner.fill = UI.Fill(corner, "ARTWORK", C.GOLD_SOFT, 1)
+	corner.fill = UI.Fill(corner, "BORDER", C.BLACK, 1)
 	corner.fill:SetPoint("TOPLEFT", 1, -1)
 	corner.fill:SetPoint("BOTTOMRIGHT", -1, 1)
+	corner.mark = corner:CreateTexture(nil, "ARTWORK")
+	corner.mark:SetPoint("TOPLEFT", 1, -1)
+	corner.mark:SetPoint("BOTTOMRIGHT", -1, 1)
 	corner:SetScript("OnEnter", function(self)
 		self.over = true
 		PaintCorner(self)
-		UI.TextTooltip(self, "Upgrades", self.better and { "Better items: " .. self.better } or nil)
+		local lines = self.state == "best" and { "Best item for this slot." }
+			or self.better and { "Better items: " .. self.better } or nil
+		UI.TextTooltip(self, "Upgrades", lines)
 	end)
 	corner:SetScript("OnLeave", function(self)
 		self.over = false
@@ -164,20 +184,44 @@ local function MakeCorner(slotFrame, slot)
 			P.Show(self.slot, self)
 		end
 	end)
+	PaintCorner(corner)
 	return corner
 end
 
--- Green corner when a better item is known.
-local function Mark()
-	local seen = {}
-	for _, corner in pairs(corners) do
-		local better = seen[corner.slot]
-		if better == nil then
-			local _, count = ns.Upgrades.Summary(Top(corner.slot))
-			better = count > 0 and count or false
-			seen[corner.slot] = better
+-- The item in the corner's own slot frame.
+local function FrameLink(corner)
+	local host = corner.host
+	local ok, id = pcall(function() return host.GetID and host:GetID() end)
+	if not ok or type(id) ~= "number" or id <= 0 or not GetInventoryItemLink then return nil end
+	local link = ns.Plain(GetInventoryItemLink("player", id))
+	return type(link) == "string" and link or nil
+end
+
+-- "best", "better" (and how many) or nil for one corner.
+local function State(corner, list)
+	local link = FrameLink(corner)
+	if link and Call("Rank", link) == 1 then return "best" end
+	local better = 0
+	if PAIRED[corner.slot] then
+		-- two rings: each frame against its own ring, not against the weaker one
+		local score = link and Call("Score", link)
+		for _, entry in ipairs(list) do
+			if not entry.worn and (type(score) ~= "number" or (entry.score or 0) > score) then better = better + 1 end
 		end
-		corner.better = better or nil
+	else
+		local _, count = ns.Upgrades.Summary(list)
+		better = count
+	end
+	if better > 0 then return "better", better end
+	return nil
+end
+
+local function Mark()
+	local lists = {}
+	for _, corner in pairs(corners) do
+		lists[corner.slot] = lists[corner.slot] or Top(corner.slot)
+		local state, better = State(corner, lists[corner.slot])
+		corner.state, corner.better = state, better
 		PaintCorner(corner)
 	end
 end
@@ -233,4 +277,4 @@ ns.Listen("SETTINGS_CHANGED", function(key)
 	end
 end)
 
-ns.Main.AddOption({ group = "Upgrades", key = "paperDoll", kind = "check", label = "Character frame buttons", default = true, tip = "Gold corner on each slot. Click: best upgrades." })
+ns.Main.AddOption({ group = "Upgrades", key = "paperDoll", kind = "check", label = "Character frame buttons", default = true, tip = "Button on each slot. Crown: best item. Orange: better item known. Click: best upgrades." })

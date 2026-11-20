@@ -792,7 +792,7 @@ function Gear.List(slotKey, ctx, opts)
 		local sources
 		if keep and filter then
 			sources = Gear.Sources(row.id)
-			keep = filter({ id = row.id, score = row.score, req = row.req, item = item }, sources, ctx)
+			keep = filter({ id = row.id, score = row.score, req = row.req, item = item }, sources, ctx, opts.anyZone)
 		end
 		if keep then
 			local suffix = SuffixOf(item, row.suffix)
