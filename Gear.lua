@@ -1181,6 +1181,52 @@ local KIND_ORDER = { boss = 1, quest = 2, vendor = 3, craft = 4, rare = 5, drop 
 
 function Gear.KindLabel(kind) return KIND_LABEL[kind] or kind end
 
+-- Vendors: what kind of vendor sells an item, and for how much (Data.vendorItems, build/vendors.lua).
+--   gold      plain vendor
+--   rep       the item needs a standing with a faction
+--   pvp       the item needs a PvP rank
+--   currency  sold for something other than gold (seen by the collector, or no gold price in the data)
+Gear.VENDOR_TYPES = { "gold", "rep", "pvp", "currency" }
+local VENDOR_LABEL = { gold = "Vendor", rep = "Reputation vendor", pvp = "PvP vendor", currency = "Currency vendor" }
+local STANDING = { [0] = "Hated", "Hostile", "Unfriendly", "Neutral", "Friendly", "Honored", "Revered", "Exalted" }
+
+function Gear.VendorLabel(kind) return VENDOR_LABEL[kind] or VENDOR_LABEL.gold end
+
+-- { buy = copper or nil, faction = name or nil, standing = number or nil, pvp = stored rank or nil }, or nil.
+local function VendorItem(id)
+	local line = Data.vendorItems and Data.vendorItems[id]
+	if not line then return nil end
+	local buy, faction, standing, pvp = line:match("^([^%^]*)%^([^%^]*)%^([^%^]*)%^([^%^]*)$")
+	return {
+		buy = tonumber(buy), faction = faction ~= "" and faction or nil,
+		standing = tonumber(standing), pvp = tonumber(pvp),
+	}
+end
+
+-- Fills a vendor source: vendor (type), label, need (what the item asks for), cost (copper).
+-- seen: the collector's price for this vendor, -1 when it was not gold.
+local function VendorDetails(source, id, seen)
+	local info = VendorItem(id)
+	local special = seen and seen < 0
+	local cost = seen and seen > 0 and seen or nil
+	local kind = "gold"
+	if info and info.pvp then
+		kind = "pvp"
+		local rank = info.pvp - 4
+		source.need = "Rank " .. (rank > 0 and rank or info.pvp)
+	elseif info and info.faction then
+		kind = "rep"
+		local standing = info.standing and (_G["FACTION_STANDING_LABEL" .. (info.standing + 1)] or STANDING[info.standing])
+		source.need = standing and (info.faction .. ": " .. standing) or info.faction
+	elseif special or (info and not info.buy and not cost) then
+		kind = "currency"
+	end
+	-- the table's gold price holds for plain and reputation vendors; a PvP or currency vendor's price
+	-- is only shown when the collector saw it in gold
+	if not cost and not special and info and (kind == "gold" or kind == "rep") then cost = info.buy end
+	source.vendor, source.label, source.cost = kind, VENDOR_LABEL[kind], cost
+end
+
 -- "map:x:y:n;map:x:y" -> spots
 local function Spots(text)
 	local spots = {}
@@ -1350,9 +1396,8 @@ function Gear.Sources(id)
 					local npc = ref and Npc(ref)
 					if npc then
 						local seen = ns.db and ns.db.collected and ns.db.collected.vendors and ns.db.collected.vendors[ref]
-						local cost = (seen and seen.items and seen.items[id]) or extra
-						if cost and cost < 0 then cost = nil end
-						local source = { kind = "vendor", name = npc.name, npc = ref, side = npc.side, cost = cost }
+						local source = { kind = "vendor", name = npc.name, npc = ref, side = npc.side }
+						VendorDetails(source, id, (seen and seen.items and seen.items[id]) or extra)
 						Place(source, npc.area, npc.inst, npc.spots)
 						source.text = Join(npc.name, source.zone)
 						out[#out + 1] = source
@@ -1435,10 +1480,16 @@ function Gear.Zones()
 	return out
 end
 
+-- One plain line for the tooltip. A vendor comes with its type, what it asks for and the price:
+-- "Kurran Steele, Elwynn Forest (vendor, 7s 92c)".
 function Gear.SourceText(id)
 	local first = Gear.Sources(id)[1]
 	if not first or first.kind == "unknown" then return nil end
-	return first.text
+	if first.kind ~= "vendor" or not first.label then return first.text end
+	local parts = { first.label:lower():gsub("^pvp", "PvP") .. "" }
+	if first.need then parts[#parts + 1] = first.need end
+	if first.cost and ns.UI and ns.UI.Money then parts[#parts + 1] = ns.UI.Money(first.cost) end
+	return first.text .. " (" .. table.concat(parts, ", ") .. ")"
 end
 
 -- Collected data changes what sources say.
