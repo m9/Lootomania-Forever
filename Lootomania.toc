@@ -1,0 +1,36 @@
+## Interface: 16001
+## Title: Lootomania
+## Notes: Gear upgrades, loot sources and loot rolls.
+## Version: 16001-0.1.0
+## Category: Loot
+## IconTexture: Interface\Icons\INV_Misc_Bag_10_Green
+## SavedVariables: LootomaniaDB
+## SavedVariablesPerCharacter: LootomaniaCharDB
+## OptionalDeps: TomTom, Baganator, EllesmereUI
+
+Core.lua
+UI.lua
+Main.lua
+Data\Stats.lua
+Data\Weights.lua
+Data\Scorer.lua
+Data\Items.lua
+Data\Sources.lua
+Data\Ranks.lua
+Data\Extras.lua
+Gear.lua
+Filters.lua
+Upgrades.lua
+PaperDoll.lua
+Simulator.lua
+Tooltip.lua
+Arrows.lua
+MobTips.lua
+Guide.lua
+Pins.lua
+Tracker.lua
+Collector.lua
+Rolls\Rolls.lua
+History.lua
+Luck.lua
+Wishlist.lua

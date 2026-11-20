@@ -1,0 +1,5 @@
+<Bindings>
+	<Binding name="LOOTOMANIA_ROLL_NEED" header="LOOTOMANIA" category="ADDONS">Lootomania_Roll("need")</Binding>
+	<Binding name="LOOTOMANIA_ROLL_GREED" category="ADDONS">Lootomania_Roll("greed")</Binding>
+	<Binding name="LOOTOMANIA_ROLL_PASS" category="ADDONS">Lootomania_Roll("pass")</Binding>
+</Bindings>
