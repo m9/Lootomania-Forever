@@ -635,12 +635,12 @@ local function Build(panel)
 		U.Refresh()
 	end)
 
+	-- the filters share the top row with the spec list: spec on the left, filters on the right
 	local top = -28
 	if ns.Filters and ns.Filters.Bar then
 		view.bar = ns.Filters.Bar(panel)
-		view.bar:SetPoint("TOPLEFT", 0, top)
-		view.bar:SetPoint("TOPRIGHT", 0, top)
-		top = top - 52
+		view.bar:SetPoint("TOPLEFT", 0, 0)
+		view.bar:SetPoint("TOPRIGHT", 0, 0)
 	end
 
 	local left = UI.Box(panel)

@@ -1,5 +1,10 @@
 # Changelog
 
+## 16001-0.1.8
+
+- Filters moved into a "Filters" window with checkboxes for sources, vendor types and rules. The Upgrades tab keeps the zone box, a Filters button with a count, and Reset, at the top right.
+- New rule: "No profession gear" hides gear that needs a profession to wear.
+
 ## 16001-0.1.7
 
 - Custom specs: the editor is a pop-up, opened from the spec list with "New spec...". Each custom spec has edit and delete icons in the list.

@@ -24,8 +24,10 @@ F.PRESETS = {
 	{ key = "nearLevel", label = "Near my level", tip = "Hide quests and dungeons over 4 levels above me." },
 	{ key = "noCraftBop", label = "No crafted BoP", tip = "Hide crafted items that bind on pickup." },
 	{ key = "noEnemyCity", label = "No enemy cities", tip = "Hide sources in enemy cities." },
-	-- no chip of its own: the zone box sets it ("Anywhere" is off)
+	-- not in the filters window: the zone box sets it ("Anywhere" is off)
 	{ key = "focusZone", label = "Zone", tip = "Only sources in one zone.", hidden = true },
+	-- "No profession gear" in the filters window
+	{ key = "noProfession", label = "Profession gear", tip = "Hide gear that needs a profession to wear.", hidden = true },
 }
 
 -- Turning one on turns these off.
@@ -41,7 +43,7 @@ local KIND_LABEL = {
 	craft = "Craft", world = "World", unknown = "Unknown",
 }
 
--- Vendor types (Gear.VENDOR_TYPES), for the "Vendors" menu.
+-- Vendor types (Gear.VENDOR_TYPES), for the filters window.
 F.VENDORS = { "gold", "rep", "pvp", "currency" }
 local VENDOR_LABEL = { gold = "Gold", rep = "Reputation", pvp = "PvP rank", currency = "Other currency" }
 
@@ -286,6 +288,8 @@ function F.Pass(entry, sources, ctx, anyZone)
 	end
 	if not st.any then return true end
 	if type(entry) ~= "table" then return true end
+	-- gear that needs a profession to wear, such as engineering goggles
+	if st.noProfession and entry.id and ns.Gear and ns.Gear.ItemSkill and ns.Gear.ItemSkill(entry.id) then return false end
 	local level, faction = ctx and ctx.level, ctx and ctx.faction
 	if type(sources) ~= "table" or #sources == 0 then return SourcePass(NO_SOURCE, entry, level, faction, anyZone) end
 	for i = 1, #sources do
@@ -574,16 +578,6 @@ local function ZoneChoices()
 	return out
 end
 
--- "Vendors" menu: one switch per vendor type. A hidden type is grey and says so.
-local function VendorChoices()
-	local out = {}
-	for i, kind in ipairs(F.VENDORS) do
-		local shown = F.VendorShown(kind)
-		out[i] = { value = kind, label = VENDOR_LABEL[kind] .. (shown and "" or ": hidden"), color = shown and C.TEXT or C.FAINT }
-	end
-	return out
-end
-
 -- The zone box sets two things: whether the zone filter is on, and which zone.
 local function PickZone(value)
 	local f = Saved()
@@ -598,68 +592,119 @@ local function ZoneValue()
 	return F.Zone() or HERE
 end
 
-local function Chip(parent, preset)
-	local chip = UI.Button(parent, preset.label, 60, 20)
-	chip:SetWidth(math.max(40, math.ceil(chip.label:GetStringWidth() or 0) + 16))
-	chip:SetScript("OnClick", function() F.Set(preset.key, not F.Get(preset.key)) end)
-	UI.Tip(chip, preset.label, { preset.tip })
-	return chip
+-- Filters window --------------------------------------------------------------------------------
+-- Every filter but the zone is a checkbox in a pop-up, in three columns:
+--   Sources   ticked: that kind of source counts
+--   Vendors   ticked: that kind of vendor counts
+--   Rules     ticked: the rule is on ("No raids", "No profession gear", ...)
+
+local window, boxes
+local RULE_LABEL = { noProfession = "No profession gear" }
+
+local function Heading(parent, text, x)
+	local head = UI.Heading(parent, 14)
+	head:SetPoint("TOPLEFT", x, -2)
+	head:SetText(text)
+	return head
 end
 
--- Two rows: presets, then source kinds, the vendors menu and the zone box. bar:Refresh() shows the saved state.
-function F.Bar(parent)
-	local bar = CreateFrame("Frame", nil, parent)
-	bar:SetHeight(46)
-	bar.chips, bar.checks = {}, {}
-
-	local last
+local function BuildWindow()
+	local rules = {}
 	for _, preset in ipairs(F.PRESETS) do
-		if not preset.hidden then
-			local chip = Chip(bar, preset)
-			bar.chips[preset.key] = chip
-			if last then chip:SetPoint("LEFT", last, "RIGHT", 4, 0) else chip:SetPoint("TOPLEFT", 0, 0) end
-			last = chip
+		if preset.key ~= "focusZone" then rules[#rules + 1] = preset end -- the zone has its own box
+	end
+	local rows = math.max(#F.KINDS, #F.VENDORS, #rules)
+	window = UI.Window("Filters", "Filters", 520, 46 + 24 + rows * 22 + 46, { strata = "DIALOG" })
+	boxes = {}
+	local body = window.body
+	local function column(x, title, list, make)
+		Heading(body, title, x)
+		for i, entry in ipairs(list) do
+			local check = make(entry)
+			check:SetPoint("TOPLEFT", x, -24 - (i - 1) * 22)
+			boxes[#boxes + 1] = check
 		end
 	end
+	column(0, "Sources", F.KINDS, function(kind)
+		local check = UI.Check(body, KIND_LABEL[kind], function(on) F.SetKind(kind, on) end)
+		check.read = function() return F.KindShown(kind) end
+		return check
+	end)
+	column(130, "Vendors", F.VENDORS, function(kind)
+		local check = UI.Check(body, VENDOR_LABEL[kind], function(on) F.SetVendor(kind, on) end)
+		check.read = function() return F.VendorShown(kind) end
+		return check
+	end)
+	column(320, "Rules", rules, function(preset)
+		local check = UI.Check(body, RULE_LABEL[preset.key] or preset.label, function(on) F.Set(preset.key, on) end)
+		check.read = function() return F.Get(preset.key) end
+		UI.Tip(check, RULE_LABEL[preset.key] or preset.label, { preset.tip })
+		return check
+	end)
+	window.reset = UI.Button(body, "Reset", 64, 22)
+	window.reset:SetPoint("BOTTOMRIGHT", 0, 0)
+	window.reset:SetScript("OnClick", F.Reset)
+	UI.Tip(window.reset, "Reset filters", { "Everything shown, no rule, any zone." })
+	window.note = UI.Text(body, "GameFontHighlightSmall", C.FAINT)
+	window.note:SetPoint("BOTTOMLEFT", 0, 4)
+	window.note:SetText("\"not confirmed\" on an item: its vendor's price is still being checked.")
+end
 
-	bar.reset = UI.Button(bar, "Reset", 54, 20)
+local function FillWindow()
+	if not window then return end
+	for _, check in ipairs(boxes) do check:SetChecked(check.read()) end
+	window.reset:SetEnabled(F.Active() > 0)
+end
+
+function F.ShowWindow()
+	if not window then BuildWindow() end
+	FillWindow()
+	window:Show()
+end
+
+function F.HideWindow()
+	if window then window:Hide() end
+end
+
+function F.ToggleWindow()
+	if window and window:IsShown() then F.HideWindow() else F.ShowWindow() end
+end
+
+function F.WindowShown() return window ~= nil and window:IsShown() end
+
+-- The window's checkboxes, for tests.
+function F.Boxes() return boxes or {} end
+
+-- At the right end of a row: the zone box, the "Filters" button that opens the window, Reset.
+-- bar:Refresh() shows the saved state.
+function F.Bar(parent)
+	local bar = CreateFrame("Frame", nil, parent)
+	bar:SetHeight(22)
+
+	-- from the right edge: Reset, the Filters button, the zone box
+	bar.reset = UI.Button(bar, "Reset", 54, 22)
 	bar.reset:SetPoint("TOPRIGHT", 0, 0)
 	bar.reset:SetScript("OnClick", F.Reset)
 	UI.Tip(bar.reset, "Reset filters")
 
-	last = nil
-	for _, kind in ipairs(F.KINDS) do
-		local check = UI.Check(bar, KIND_LABEL[kind], function(on) F.SetKind(kind, on) end)
-		if last then check:SetPoint("LEFT", last, "RIGHT", 6, 0) else check:SetPoint("TOPLEFT", 0, -25) end
-		bar.checks[kind] = check
-		last = check
-	end
-
-	-- which vendors count: gold, reputation, PvP rank, other currency
-	bar.vendors = F.ListPicker(bar, 74, VendorChoices, function(kind)
-		F.SetVendor(kind, not F.VendorShown(kind))
-	end, { fixed = "Vendors", keep = true, menuWidth = 170, right = true })
-	-- first row, left of Reset: the second row has no room beside the zone box
-	bar.vendors:SetHeight(20)
-	bar.vendors:SetPoint("RIGHT", bar.reset, "LEFT", -4, 0)
-	UI.Tip(bar.vendors, "Vendors", { "Which vendors count as a source.", "Click a line to hide or show it.",
-		"\"not confirmed\" on an item: that vendor's price or requirements are still being checked." })
+	bar.open = UI.Button(bar, "Filters", 96, 22)
+	bar.open:SetPoint("RIGHT", bar.reset, "LEFT", -4, 0)
+	bar.open:SetScript("OnClick", F.ToggleWindow)
+	UI.Tip(bar.open, "Filters", { "Sources, vendors and rules.", "The number is how many filters are on." })
 
 	bar.zone = F.SearchPicker(bar, 190, ZoneChoices, PickZone, { rows = 14 })
-	bar.zone:SetPoint("TOPRIGHT", 0, -24)
+	bar.zone:SetPoint("RIGHT", bar.open, "LEFT", -4, 0)
 	UI.Tip(bar.zone.edit, "Zone", { "Only sources in one zone.", "Type to search." })
 
 	function bar:Refresh()
-		for key, chip in pairs(self.chips) do chip:SetOn(F.Get(key)) end
-		for kind, check in pairs(self.checks) do check:SetChecked(F.KindShown(kind)) end
-		local hidden = false
-		for _, kind in ipairs(F.VENDORS) do
-			if not F.VendorShown(kind) then hidden = true end
-		end
-		self.vendors:SetOn(hidden) -- lit when some vendors are left out
+		-- the zone has its own box: count the other filters on the button
+		local n = F.Active() - (F.Get("focusZone") and 1 or 0)
+		self.open:SetLabel(n > 0 and ("Filters: " .. n) or "Filters")
+		self.open:SetOn(n > 0)
 		self.zone:SetValue(ZoneValue())
 		self.reset:SetEnabled(F.Active() > 0)
 	end
+	bar:HookScript("OnHide", F.HideWindow)
 
 	bars[#bars + 1] = bar
 	if ns.char then bar:Refresh() end
@@ -668,4 +713,5 @@ end
 
 ns.Listen("FILTERS_CHANGED", function()
 	for _, bar in ipairs(bars) do bar:Refresh() end
+	if window and window:IsShown() then FillWindow() end
 end)
