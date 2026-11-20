@@ -1181,6 +1181,17 @@ local KIND_ORDER = { boss = 1, quest = 2, vendor = 3, craft = 4, rare = 5, drop 
 
 function Gear.KindLabel(kind) return KIND_LABEL[kind] or kind end
 
+-- The profession an item needs to be worn (Data.itemSkill, build/skills.lua):
+-- { skill = skill line id, rank = number, name = "Engineering" }, or nil.
+function Gear.ItemSkill(id)
+	local line = Data.itemSkill and Data.itemSkill[id]
+	if not line then return nil end
+	local skill, rank = line:match("^(%d+)%^(%d*)$")
+	skill = tonumber(skill)
+	if not skill then return nil end
+	return { skill = skill, rank = tonumber(rank) or 0, name = Data.skillNames and Data.skillNames[skill] or "Profession" }
+end
+
 -- Vendors: what kind of vendor sells an item, and for how much (Data.vendorItems, build/vendors.lua).
 --   gold      plain vendor
 --   rep       the item needs a standing with a faction
