@@ -981,7 +981,7 @@ function Gear.List(slotKey, ctx, opts)
 	opts = opts or {}
 	local out = {}
 	if not ctx or not ctx.spec or not SLOT[slotKey] then return out end
-	local count = opts.count or ns.db.huntsPerSlot or 5
+	local count = opts.count or ns.db.huntsPerSlot or 15
 	local full = FullList(slotKey, ctx)
 	local top = full[1] and full[1].score or 0
 	-- the done and removed views show what was marked, whatever the filters say
@@ -1038,6 +1038,38 @@ function Gear.List(slotKey, ctx, opts)
 		end
 	end
 	return out
+end
+
+-- How far the worn gear is from the best there is for ctx, over all slots.
+-- Returns percent (0 to 100, two decimals; 100 only when every slot holds a best item), worn points, best points.
+-- A slot counts what it holds, at most its best: rings and trinkets two items, a worn two-hander
+-- takes the off hand out of the count. nil for a preview of another class or when there is no data.
+function Gear.Progress(ctx)
+	ctx = Ctx(ctx)
+	if not ctx or not ctx.spec or not OwnGear(ctx) then return nil end
+	local twoHanded = false
+	for _, w in ipairs(Gear.Worn("MainHand")) do
+		if WornHand(w) == "two" then twoHanded = true end
+	end
+	local have, best = 0, 0
+	for _, slot in ipairs(Gear.SLOTS) do
+		if not (slot.key == "OffHand" and twoHanded) then
+			local full = FullList(slot.key, ctx)
+			local top = full[1] and full[1].score or 0
+			if top > 0 then
+				local scores = {}
+				for _, w in ipairs(Gear.Worn(slot.key)) do scores[#scores + 1] = math.min(Gear.Score(w.link, ctx) or 0, top) end
+				table.sort(scores, function(a, b) return a > b end)
+				for n = 1, #slot.inv do
+					best = best + top
+					have = have + (scores[n] or 0)
+				end
+			end
+		end
+	end
+	if best <= 0 then return nil end
+	local percent = have >= best - 1e-6 and 100 or math.min(99.99, math.floor(have / best * 10000) / 100)
+	return percent, have, best
 end
 
 function Gear.Rank(what, ctx)

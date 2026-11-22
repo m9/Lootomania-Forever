@@ -1329,6 +1329,7 @@ end
 function Fill()
 	if not view.scroll then return end
 	FillHeader()
+	U.FillProgress()
 	FillSlots()
 	local all = sel == nil
 	view.over:SetShown(all)
@@ -1420,7 +1421,7 @@ local function SlotRow(parent, i, key, label)
 	row:SetScript("OnEnter", function(self)
 		self.over:Show()
 		if self.key and self.better and self.better > 0 then
-			UI.TextTooltip(self, label, { "Better items: " .. self.better .. (self.better >= (ns.db.huntsPerSlot or 5) and " or more" or "") })
+			UI.TextTooltip(self, label, { "Better items: " .. self.better .. (self.better >= (ns.db.huntsPerSlot or 15) and " or more" or "") })
 		end
 	end)
 	row:SetScript("OnLeave", function(self)
@@ -1432,6 +1433,94 @@ local function SlotRow(parent, i, key, label)
 end
 
 local STATES = { { key = "active", label = "Active" }, { key = "done", label = "Done" }, { key = "removed", label = "Removed" } }
+
+-- Progress bar: how close the worn gear is to the best for the level and spec -----------------------
+
+-- Bands by percent: upper limit, name, color. The marks sit where a band starts: 25, 50, 75.
+local BANDS = {
+	{ 25, "Average", { 0.20, 0.85, 0.20 } }, -- green
+	{ 50, "Good", { 0.15, 0.55, 1.00 } }, -- blue
+	{ 75, "Great", { 0.70, 0.30, 1.00 } }, -- violet
+	{ 99.99, "Excellent", { 1.00, 0.80, 0.00 } }, -- gold
+	{ 100, "Best", { 1.00, 0.15, 0.15 } }, -- red
+}
+local MARKS = { 25, 50, 75 }
+
+function U.Band(percent)
+	for _, band in ipairs(BANDS) do
+		if percent <= band[1] then return band[2], band[3] end
+	end
+	return BANDS[#BANDS][2], BANDS[#BANDS][3]
+end
+
+function U.Progress(parent)
+	local frame = CreateFrame("Frame", nil, parent)
+	frame:SetHeight(33)
+	-- the score above the bar
+	frame.text = UI.Text(frame, "GameFontHighlightSmall", C.TEXT)
+	frame.text:SetFont((frame.text:GetFont()), 15, "")
+	frame.text:SetPoint("TOPLEFT", 0, 0)
+	frame.text:SetPoint("TOPRIGHT", 0, 0)
+	frame.text:SetJustifyH("CENTER")
+	local bar = CreateFrame("Frame", nil, frame, "BackdropTemplate")
+	bar:SetPoint("TOPLEFT", 0, -19)
+	bar:SetPoint("TOPRIGHT", 0, -19)
+	bar:SetHeight(12)
+	UI.Panel(bar, C.PANEL, 1, C.LINE)
+	frame.bar = bar
+	frame.fill = UI.Fill(bar, "ARTWORK", C.GREEN, 1)
+	frame.fill:SetPoint("TOPLEFT", 1, -1)
+	frame.fill:SetPoint("BOTTOMLEFT", 1, 1)
+	frame.fill:SetWidth(1)
+	frame.marks = {}
+	for i, mark in ipairs(MARKS) do
+		local tick = UI.Fill(bar, "OVERLAY", C.TEXT, 0.55)
+		tick:SetWidth(1)
+		tick:SetPoint("TOP", 0, -1)
+		tick:SetPoint("BOTTOM", 0, 1)
+		frame.marks[i] = { tick = tick, at = mark }
+	end
+
+	function frame:Layout()
+		local width = bar:GetWidth()
+		if not width or width < 10 then return end
+		self.width = width
+		for _, mark in ipairs(self.marks) do
+			local x = (width - 2) * mark.at / 100 + 1
+			mark.tick:ClearAllPoints()
+			mark.tick:SetPoint("TOP", bar, "TOPLEFT", x, -1)
+			mark.tick:SetPoint("BOTTOM", bar, "BOTTOMLEFT", x, 1)
+		end
+		self:Paint()
+	end
+	function frame:Set(percent, have, best)
+		self.percent, self.have, self.best_ = percent, have, best
+		self:Paint()
+	end
+	function frame:Paint()
+		local percent = self.percent
+		if not percent then
+			self.fill:SetWidth(1)
+			self.text:SetText("")
+			return
+		end
+		local name, color = U.Band(percent)
+		self.fill:SetColorTexture(color[1], color[2], color[3], 1)
+		self.fill:SetWidth(math.max(1, ((self.width or 200) - 2) * percent / 100))
+		self.text:SetText(UI.Colored("Your gear score is: ", C.GOLD) .. UI.Colored((percent >= 100 or percent <= 0) and tostring(percent) or string.format("%.2f", percent), { 1, 1, 1 }) .. " (" .. UI.Colored(name, color) .. ")")
+	end
+	frame:SetScript("OnSizeChanged", function(self) self:Layout() end)
+	frame:SetScript("OnShow", function(self) self:Layout() end)
+	return frame
+end
+
+function U.FillProgress()
+	local bar = view.progress
+	if not bar then return end
+	local percent, have, best = Call("Progress")
+	bar:SetShown(percent ~= nil)
+	bar:Set(percent, have, best)
+end
 
 local function Build(panel)
 	local playerClass = function()
@@ -1462,10 +1551,10 @@ local function Build(panel)
 		end
 		pick(key)
 	end)
-	view.spec:SetPoint("TOPLEFT", 0, 0)
+	view.spec:SetPoint("TOPLEFT", 0, -44)
 	UI.Tip(view.spec, "Spec")
 	view.note = UI.Text(panel, "GameFontHighlightSmall", C.BLUE)
-	view.note:SetPoint("TOPLEFT", 2, -5)
+	view.note:SetPoint("TOPLEFT", 2, -49)
 	view.back = UI.Button(panel, "Back to me", 90, 22)
 	view.back:SetPoint("LEFT", view.note, "RIGHT", 10, 0)
 	view.back:SetScript("OnClick", function()
@@ -1473,12 +1562,18 @@ local function Build(panel)
 		U.Refresh()
 	end)
 
-	-- the filters share the top row with the spec list: spec on the left, filters on the right
-	local top = -28
+	-- score and bar on top, a line, then the spec list on the left and the filters on the right
+	local top = -72
+	view.progress = U.Progress(panel)
+	view.progress:SetPoint("TOPLEFT", 0, 0)
+	view.progress:SetPoint("TOPRIGHT", 0, 0)
+	-- a line under the score and the bar, above the spec and the filters
+	local rule = UI.Divider(panel, ns.Main.PANEL_WIDTH)
+	rule:SetPoint("TOPLEFT", 0, -37)
 	if ns.Filters and ns.Filters.Bar then
 		view.bar = ns.Filters.Bar(panel)
-		view.bar:SetPoint("TOPLEFT", 0, 0)
-		view.bar:SetPoint("TOPRIGHT", 0, 0)
+		view.bar:SetPoint("TOPLEFT", 0, -44)
+		view.bar:SetPoint("TOPRIGHT", 0, -44)
 	end
 
 	local left = UI.Box(panel)
@@ -1574,7 +1669,7 @@ end)
 
 -- Settings and commands ----------------------------------------------------------------------------
 
-ns.Main.AddOption({ group = "Upgrades", key = "huntsPerSlot", kind = "slider", label = "Items per slot", min = 3, max = 15, step = 1, default = 5 })
+ns.Main.AddOption({ group = "Upgrades", key = "huntsPerSlot", kind = "slider", label = "Items per slot", min = 3, max = 15, step = 1, default = 15 })
 ns.Main.AddOption({ group = "Upgrades", key = "upHideBelowWorn", kind = "check", label = "Hide items below equipped", default = false })
 
 ns.Command("upgrades", "Upgrades", function() ns.Main.Toggle("upgrades") end)

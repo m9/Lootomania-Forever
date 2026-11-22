@@ -31,6 +31,10 @@ end
 
 local function Build()
 	window = UI.Window("Main", "Lootomania", WIDTH, HEIGHT, { scaleKey = "mainScale" })
+	-- version, small and grey, at the lower right of the title
+	local version = UI.Text(window, "GameFontHighlightSmall", UI.C.FAINT)
+	version:SetPoint("BOTTOMLEFT", window.title, "BOTTOMRIGHT", 6, 1)
+	version:SetText(ns.VERSION)
 	tabBar = UI.Tabs(window.body, nil, function(key) Main.Open(key) end)
 	tabBar:SetPoint("TOPLEFT", 0, 0)
 	tabBar:SetPoint("TOPRIGHT", 0, 0)
