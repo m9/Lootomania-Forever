@@ -189,8 +189,13 @@ end
 
 -- Gives a frame a text tooltip.
 function UI.Tip(frame, title, lines)
-	frame:HookScript("OnEnter", function(self) UI.TextTooltip(self, title, type(lines) == "function" and lines() or lines) end)
-	frame:HookScript("OnLeave", UI.HideTooltip)
+	local function hook(target)
+		target:HookScript("OnEnter", function(self) UI.TextTooltip(self, title, type(lines) == "function" and lines() or lines) end)
+		target:HookScript("OnLeave", UI.HideTooltip)
+	end
+	hook(frame)
+	-- a slider kit: the real slider is a child that takes the mouse
+	if frame.slider then hook(frame.slider) end
 end
 
 -- Buttons -----------------------------------------------------------------------------
@@ -292,6 +297,7 @@ end
 function UI.Slider(parent, label, min, max, step, onChange, format, lazy)
 	local f = CreateFrame("Frame", nil, parent)
 	f:SetSize(220, 34)
+	f:EnableMouse(true) -- so the tip of the setting shows over the label too
 	f.label = UI.Text(f, "GameFontHighlightSmall", C.TEXT)
 	f.label:SetPoint("TOPLEFT")
 	f.label:SetText(label or "")

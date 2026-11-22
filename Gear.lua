@@ -18,7 +18,7 @@ ns.Gear = Gear
 ns.Data = ns.Data or {}
 local Data = ns.Data
 
-ns.Defaults({ huntsPerSlot = 5, customSpecs = {} })
+ns.Defaults({ customSpecs = {} })
 ns.Defaults({ hunts = { tracked = {}, state = {}, suffix = {} } }, "char")
 
 -- Slots --------------------------------------------------------------------------------
@@ -42,14 +42,10 @@ Gear.SLOTS = {
 }
 local SLOT = {} -- key -> slot
 local SLOT_INDEX = {} -- key -> number, as packed
-local INV_SLOT = {} -- inventory slot id -> key
 for i, slot in ipairs(Gear.SLOTS) do
 	SLOT[slot.key] = slot
 	SLOT_INDEX[slot.key] = i
-	for _, inv in ipairs(slot.inv) do INV_SLOT[inv] = slot.key end
 end
-
-function Gear.SlotOfInv(inv) return INV_SLOT[inv] end
 
 -- Packed numbers for hand and armor, shared with build\pack.lua.
 local HANDS = { "two", "one", "main", "off", "shield", "held", "ranged", "wand", "thrown", "relic" }
@@ -545,9 +541,6 @@ function Gear.Usable(id, ctx)
 	return UsableFor(item, ctx)
 end
 
-local REASON = { class = "Wrong class", armor = "Can't wear", weapon = "Can't wield", faction = "Other faction", level = "Level too low" }
-function Gear.ReasonText(reason) return REASON[reason] or "Can't use" end
-
 -- Scores ------------------------------------------------------------------------------------
 
 local scoreCache = Cache()
@@ -649,7 +642,7 @@ function Gear.Worn(slotKey)
 		for _, inv in ipairs(slot.inv) do
 			local link = GetInventoryItemLink("player", inv)
 			if link then
-				worn[#worn + 1] = { link = link, id = ns.ItemID(link), inv = inv, score = Gear.Score(link, Gear.PlayerContext()) }
+				worn[#worn + 1] = { link = link, id = ns.ItemID(link), inv = inv }
 			end
 		end
 	end
@@ -1014,6 +1007,9 @@ function Gear.List(slotKey, ctx, opts)
 			local suffix = SuffixOf(item, row.suffix)
 			local worn = OwnGear(ctx) and IsWornInHands(slotKey, row.id, row.suffix, item.hand)
 			local toBeat = WornScore(slotKey, ctx, item.hand)
+			-- a one-hander in the off-hand list is measured on its own list, as Compare does
+			local own = item.slot ~= slotKey and FullList(item.slot, ctx)[1]
+			local scale = own and own.score or top
 			sources = sources or Gear.Sources(row.id, ctx)
 			local source = type(passing) == "table" and passing or sources[1]
 			out[#out + 1] = {
@@ -1026,9 +1022,9 @@ function Gear.List(slotKey, ctx, opts)
 				req = item.req,
 				score = row.score,
 				rank = rank,
-				index = top > 0 and math.floor(row.score / top * 100 + 0.5) or 0,
+				index = scale > 0 and math.floor(row.score / scale * 100 + 0.5) or 0,
 				delta = toBeat and (row.score - toBeat) or nil,
-				gain = toBeat and top > 0 and math.max(-100, math.min(100, (row.score - toBeat) / top * 100)) or nil,
+				gain = toBeat and scale > 0 and math.max(-100, math.min(100, (row.score - toBeat) / scale * 100)) or nil,
 				worn = worn or nil,
 				suffix = suffix and { id = suffix.id, name = suffix.name } or nil,
 				hand = item.hand,
@@ -1191,7 +1187,6 @@ function Gear.Compare(link, ctx)
 			if not result.delta or delta > result.delta then
 				result.delta = delta
 				result.slot = slotKey
-				result.percent = toBeat > 0 and (delta / toBeat * 100) or nil
 				-- on the scale of the item's own list: a main-hand weapon put in a free off hand is
 				-- worth far more than the best shield, so on the off-hand scale every one reads +100
 				result.gain = Points(item.slot, ctx, delta, true)
@@ -1208,7 +1203,6 @@ function Gear.Compare(link, ctx)
 			result.index = Points(item.slot, ctx, score)
 			result.isWorn = true
 			result.delta = 0
-			result.percent = 0
 			result.gain = 0
 			break
 		end
@@ -1508,11 +1502,9 @@ end
 --   rep       the item needs a standing with a faction
 --   pvp       the item needs a PvP rank
 --   currency  sold for something other than gold (seen by the collector, or no gold price in the data)
-Gear.VENDOR_TYPES = { "gold", "rep", "pvp", "currency" }
 local VENDOR_LABEL = { gold = "Vendor", rep = "Reputation vendor", pvp = "PvP vendor", currency = "Currency vendor" }
 local STANDING = { [0] = "Hated", "Hostile", "Unfriendly", "Neutral", "Friendly", "Honored", "Revered", "Exalted" }
 
-function Gear.VendorLabel(kind) return VENDOR_LABEL[kind] or VENDOR_LABEL.gold end
 
 -- { buy = copper or nil, faction = name or nil, standing = number or nil, pvp = stored rank or nil }, or nil.
 local function VendorItem(id)
@@ -1776,9 +1768,8 @@ local function SeenChance(key, itemId)
 end
 
 local function PercentText(chance)
-	if not chance then return "" end
-	if chance >= 10 then return (", %d%%"):format(chance + 0.5) end
-	return (", %.1f%%"):format(chance)
+	local text = ns.ChanceText(chance)
+	return text and (", " .. text) or ""
 end
 
 local function Join(first, second)
@@ -2013,8 +2004,20 @@ function Gear.Sources(id, ctx)
 	return out
 end
 
--- A quest handed in changes what its reward's sources say.
-ns.On("QUEST_TURNED_IN", function() Gear.ForgetSources() end)
+-- A quest handed in changes what its reward's sources say. The lists and tooltips keep their own
+-- caches until a message: send it once the game says the quest is done (1 s), and again at 2 s
+-- in case the game had not set the quest as done by then.
+-- The collector calls SourcesChanged too, when it learned a drop chance or a price.
+local questDone = ns.Debounce(1, ContextChanged)
+Gear.SourcesChanged = ns.Debounce(2, function()
+	Gear.ForgetSources()
+	ns.Send("HUNTS_CHANGED")
+end)
+ns.On("QUEST_TURNED_IN", function()
+	Gear.ForgetSources()
+	questDone()
+	Gear.SourcesChanged()
+end)
 
 -- The sources of an item as groups for a detail view, in the order of Gear.Sources (ctx as there):
 --   - all plain drops are one group; group.byPlace splits it by place;
@@ -2173,12 +2176,19 @@ function Gear.SourceSummary(id, ctx, source, nested)
 	if not g then return "Source unknown", "unknown", 0 end
 	local s, kind = g.source, g.kind
 	local text = s.text
+	-- The place of the source that passed the filters: the line names it first.
+	local here = source and (source.inst or source.zone)
+	local function Front(list)
+		local out = { places = {} }
+		AddOnce(out.places, here)
+		for _, place in ipairs(list) do AddOnce(out.places, place) end
+		return out
+	end
 	-- An item in chests of many names is the random loot of the world's chests. One line for all
 	-- of them: one chest must not read like the item's place ("Solid Chest, Duskwood" for a green
 	-- that is in nine kinds of chest).
 	if kind == "object" then
-		local kinds, all = 0, { places = {} }
-		for _, place in ipairs(g.places) do AddOnce(all.places, place) end
+		local kinds, all = 0, Front(g.places)
 		for _, group in ipairs(groups) do
 			if group.kind == "object" then
 				kinds = kinds + 1
@@ -2209,12 +2219,16 @@ function Gear.SourceSummary(id, ctx, source, nested)
 				if not best or #part.names > #best.names then best = part end
 			end
 		end
+		-- the place of the source that passed, not the one with the most
+		for _, part in ipairs(here and g.byPlace or {}) do
+			if part.place == here then best = part end
+		end
 		text = #g.names .. (kind == "boss" and " bosses" or " creatures")
 		if best then
 			text = text .. ", " .. best.place .. (named > 1 and (", +" .. (named - 1) .. (named == 2 and " place" or " places")) or "")
 		end
 	elseif #g.places > 1 then
-		text = (g.name or s.name or "?") .. ", " .. PlacesText(g)
+		text = (g.name or s.name or "?") .. ", " .. PlacesText(Front(g.places))
 	end
 	return text, kind, #groups - 1
 end
@@ -2370,7 +2384,8 @@ local enchantCache = Cache()
 function Gear.BestEnchant(slotKey, ctx)
 	ctx = Ctx(ctx)
 	if not ctx or not ctx.spec or not Data.enchants or not ns.Scorer then return nil end
-	local key = CtxKey(ctx) .. "/" .. slotKey
+	-- a preview has no worn weapon: its answer is its own
+	local key = CtxKey(ctx) .. "/" .. slotKey .. (ctx.preview and "/p" or "")
 	local best = enchantCache[key]
 	if best ~= nil then return best or nil end
 	best = false
@@ -2393,7 +2408,7 @@ function Gear.BestEnchant(slotKey, ctx)
 				if enchant.dmg then score = score + enchant.dmg / 2.4 * (rec.dps or 0) end
 				if score > 0 and (not best or score > best.score) then
 					best = { id = enchant.id, name = enchant.name, spell = enchant.spell, item = enchant.item, score = score,
-						text = enchant.text or enchant.name, prof = enchant.prof, skill = enchant.skill }
+						text = enchant.text or enchant.name, prof = enchant.prof, skill = enchant.skill, skillMax = enchant.skillMax }
 				end
 			end
 		end
@@ -2438,15 +2453,18 @@ local function Install(class, spec)
 	}
 end
 
+local function DropPools(class, specKey)
+	for key in pairs(pools) do
+		if key:find(class .. "/" .. specKey .. "/", 1, true) == 1 then pools[key] = nil end
+	end
+end
+
 function Gear.SaveCustom(class, spec)
 	if not spec.key then spec.key = "custom_" .. spec.label:lower():gsub("[^%w]+", "_") end
 	ns.db.customSpecs[class] = ns.db.customSpecs[class] or {}
 	ns.db.customSpecs[class][spec.key] = spec
 	Install(class, spec)
-	for key in pairs(pools) do
-		if key:find(class .. "/" .. spec.key .. "/", 1, true) == 1 then pools[key] = nil end
-	end
-	if ns.Scorer and ns.Scorer.forget then ns.Scorer.forget() end
+	DropPools(class, spec.key)
 	ContextChanged()
 	return spec.key
 end
@@ -2456,6 +2474,7 @@ function Gear.DeleteCustom(class, key)
 	if ns.db.customSpecs[class] then ns.db.customSpecs[class][key] = nil end
 	local byClass = ClassWeights(class)
 	if byClass and byClass[key] and byClass[key].custom then byClass[key] = nil end
+	DropPools(class, key)
 	-- the spec in use: back to the one it was made from, wherever it was deleted
 	if ns.char.spec == key then
 		local base = saved and saved.base

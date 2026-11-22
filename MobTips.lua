@@ -113,9 +113,7 @@ function Mob.Rows(npc)
 end
 
 local function ChanceText(chance)
-	if chance >= 10 then return ("%d%%"):format(math.floor(chance + 0.5)) end
-	if chance < 0.1 then return "<0.1%" end
-	return (("%.1f"):format(chance):gsub("%.0$", "")) .. "%"
+	return ns.ChanceText(chance) or ""
 end
 
 -- all: every piece of gear, wanted first (the default; user, 2026-11-21: "always, without Shift").

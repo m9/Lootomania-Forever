@@ -1,5 +1,14 @@
 # Changelog
 
+## 16001-0.1.10
+
+- Tooltips refresh after a quest hand-in. The Tracked and History tabs and the side panel redraw when gear or spec changes.
+- A source line names the place that passed the filter. Learned drop chances and vendor prices show.
+- Two identical rolls no longer mix. The tracker and "Got it" count the item's suffix.
+- Chat roll filter, raid exit timers and the History player table fixed.
+- Filters are exact: the data keeps every ranked row. The enchanting skill is no longer guessed.
+- Many smaller fixes from a code review.
+
 ## 16001-0.1.9
 
 - Sources a player can use: no closed raids, no other faction's or class's items. Dead-end sources fixed. Items QuestieDB has no source for get one from AllTheThings.

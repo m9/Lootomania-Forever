@@ -210,13 +210,18 @@ local function BuildTab(panel)
 		-- second click resets
 		if not self.armed then
 			self.armed = true
+			local at = GetTime()
+			self.armedAt = at
 			self:SetLabel("Sure?")
 			C_Timer.After(3, function()
+				-- the timer of an earlier click does not disarm a later one
+				if self.armedAt ~= at then return end
 				self.armed = nil
 				self:SetLabel("Reset")
 			end)
 			return
 		end
+		self.armedAt = nil
 		self.armed = nil
 		self:SetLabel("Reset")
 		L.Reset(view.key)

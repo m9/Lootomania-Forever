@@ -78,15 +78,13 @@ local VIA = { recipe = "Recipe: ", box = "Box: " }
 -- tracked list changes: a row is drawn again every two seconds.
 local worth = {}
 
-local function Worth(id)
-	local known = worth[id]
-	if known then return known end
+-- link: an item in hand (a drop); else the suffix to look for.
+local function Make(id, link)
 	local Gear = ns.Gear
-	known = {}
-	worth[id] = known
+	local known = {}
 	if not (Gear and Gear.Compare and Gear.WantedLink and Gear.PlayerContext) then return known end
 	local ctx = Gear.PlayerContext()
-	local ok, c = pcall(Gear.Compare, Gear.WantedLink(id, ctx), ctx)
+	local ok, c = pcall(Gear.Compare, link or Gear.WantedLink(id, ctx), ctx)
 	if not ok or type(c) ~= "table" or c.known == false then return known end
 	if c.isWorn then
 		known.text, known.delta = UI.Colored("Equipped", C.GOLD_SOFT), 0
@@ -108,8 +106,19 @@ local function Worth(id)
 	return known
 end
 
-function Tracker.Worth(id)
-	local known = Worth(id)
+local function Worth(id)
+	local known = worth[id]
+	if not known then
+		known = Make(id)
+		worth[id] = known
+	end
+	return known
+end
+
+function Tracker.Worth(id, link)
+	local Gear = ns.Gear
+	-- the link of a drop with its own suffix is worth what that suffix is worth
+	local known = type(link) == "string" and Gear and Gear.LinkSuffixID and Gear.LinkSuffixID(link) and Make(id, link) or Worth(id)
 	return known.text, known.delta
 end
 
@@ -220,9 +229,13 @@ local function Build()
 	-- The window hangs by its top left corner, so that a change of height (folding, a row more)
 	-- moves its bottom edge and the fold button stays under the mouse. An older saved place (any
 	-- anchor the game picked) is used as it is and pinned at the first change of height.
+	-- The place is in the window's own scale units, saved with that scale (as UI.Window does).
 	local saved = ns.db.windows.Tracker
+	local scale = (ns.db.trackerScale or 100) / 100
+	frame:SetScale(scale)
 	if saved and saved.x then
-		frame:SetPoint(saved.point or "CENTER", UIParent, saved.rel or saved.point or "CENTER", saved.x, saved.y)
+		local k = saved.scale and saved.scale / scale or 1
+		frame:SetPoint(saved.point or "CENTER", UIParent, saved.rel or saved.point or "CENTER", saved.x * k, saved.y * k)
 	else
 		frame:SetPoint("TOPRIGHT", UIParent, "RIGHT", -60, 150)
 	end
@@ -232,7 +245,7 @@ local function Build()
 	frame:SetScript("OnDragStop", function(self)
 		self:StopMovingOrSizing()
 		local left, top = self:GetLeft(), self:GetTop()
-		if left and top then ns.db.windows.Tracker = { point = "TOPLEFT", rel = "BOTTOMLEFT", x = left, y = top } end
+		if left and top then ns.db.windows.Tracker = { point = "TOPLEFT", rel = "BOTTOMLEFT", x = left, y = top, scale = self:GetScale() } end
 	end)
 
 	frame.title = UI.Heading(frame, 14)
@@ -293,7 +306,19 @@ function Tracker.Refresh()
 		return
 	end
 	if not frame then Build() end
-	frame:SetScale((ns.db.trackerScale or 100) / 100)
+	local scale, old = (ns.db.trackerScale or 100) / 100, frame:GetScale()
+	if math.abs(scale - old) > 0.001 then
+		-- a new size keeps the top left corner where it is on screen
+		local left, top = frame:GetLeft(), frame:GetTop()
+		frame:SetScale(scale)
+		if left and top then
+			frame:ClearAllPoints()
+			frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left * old / scale, top * old / scale)
+			if ns.db.windows.Tracker then
+				ns.db.windows.Tracker = { point = "TOPLEFT", rel = "BOTTOMLEFT", x = left * old / scale, y = top * old / scale, scale = scale }
+			end
+		end
+	end
 	frame.title:SetText(("Tracked: %d"):format(#ids))
 	local folded = ns.db.trackerCollapsed
 	frame.fold:SetLabel(folded and "+" or "-")
@@ -408,7 +433,7 @@ local function Got(id, link)
 	local name = Name(id) -- before the hunt and its suffix are cleared
 	link = ns.Plain(link)
 	local shown = type(link) == "string" and link or Link(id) or name
-	local suffix = WantedSuffix(id)
+	local suffix = WantedSuffix(id) or (type(link) == "string" and Gear.LinkSuffixID and Gear.LinkSuffixID(link)) or nil
 	Gear.SetState(id, "done", suffix)
 	Gear.Track(id, false)
 	local target = ns.Guide and ns.Guide.Target()
@@ -536,6 +561,10 @@ ns.Command("untrack", "Untrack: <item link> or all", function(rest)
 		return
 	end
 	local shown = Link(id) or (Name(id)) -- before the hunt and its suffix are cleared
+	if not Gear.IsTracked(id) then
+		ns.Print("Not tracked: " .. shown)
+		return
+	end
 	Gear.Track(id, false)
 	ns.Print("Untracked: " .. shown)
 end)

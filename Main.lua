@@ -12,7 +12,7 @@ Main.WIDTH, Main.HEIGHT = WIDTH, HEIGHT
 -- Room a tab's panel has.
 Main.PANEL_WIDTH, Main.PANEL_HEIGHT = WIDTH - 24, HEIGHT - 46 - 12 - 32
 
-ns.Defaults({ lastTab = "upgrades", minimap = { hide = false, angle = 215 } })
+ns.Defaults({ lastTab = "upgrades" })
 
 local window, tabBar
 local tabs = {} -- key -> { key, label, order, build, show, panel }
@@ -170,7 +170,7 @@ end)
 
 -- Settings tab ------------------------------------------------------------------------
 -- Modules add their options with ns.Main.AddOption; the tab lays them out in groups.
---   { group = "Roll window", key = "rollSound", kind = "check"|"slider"|"pick", label = "...",
+--   { group = "Roll window", key = "rollSound", kind = "check"|"slider", label = "...",
 --     min =, max =, step =, format =, choices = {{value=,label=}}, tip = "...",
 --     lazy = true (slider: applies when the mouse button comes up) }
 -- Values live in ns.db[key]; a change sends "SETTINGS_CHANGED".
@@ -228,13 +228,6 @@ local function BuildSettings(panel)
 					control:SetWidth(columnWidth - 40)
 					control:SetPoint("TOPLEFT", x, y - 2)
 					y = y - 40
-				elseif option.kind == "pick" then
-					local label = UI.Text(content, "GameFontHighlightSmall", UI.C.TEXT)
-					label:SetPoint("TOPLEFT", x, y - 4)
-					label:SetText(option.label)
-					control = UI.Picker(content, 120, option.choices, function(v) ns.Set(option.key, v) end)
-					control:SetPoint("TOPLEFT", x + columnWidth - 160, y)
-					y = y - 26
 				end
 				if control then
 					control.option = option

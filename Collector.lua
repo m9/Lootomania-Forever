@@ -22,6 +22,10 @@ local _, ns = ...
 --   noItem = { [itemId] = true }, -- asked by /lm scan, the server has no such item
 -- }
 --
+-- What the build reads today: loot by creature (not objects), vendors, quests' choice and fixed rewards.
+-- Kept for the developer, read by no build stage yet: items, noItem (also the scan's own list of
+-- ids already asked), loot of objects, a quest's giver and ender.
+--
 --   ns.Collector.See(link)   notes an item when our data lacks it
 --   ns.Collector.Counts()    loot, vendors, quests, items, noItem
 
@@ -39,7 +43,7 @@ ns.Defaults({
 	scanSize = 0,
 })
 ns.Main.AddOption({ group = "Collector", key = "collect", kind = "check", label = "Remember what you see", default = true,
-	tip = "Drops, vendor prices and quest rewards, for the drop chances and prices in tooltips. Stays on this computer." })
+	tip = "Drops, vendor prices and quest rewards, for the drop chances and prices in tooltips. Also items the data lacks. Stays on this computer." })
 
 local function Data() return ns.db and ns.db.collected end
 local function On() return ns.db and ns.db.collect and ns.db.collected and true or false end
@@ -181,13 +185,13 @@ local looted = {} -- corpse or object GUID -> true, this session
 local lootedCount = 0
 
 local function SourceKey(guid)
+	local npc = ns.NpcID(guid)
+	if npc then return npc end
 	guid = ns.Plain(guid)
 	if type(guid) ~= "string" then return nil end
 	local kind, _, _, _, _, id = strsplit("-", guid)
 	id = tonumber(id)
-	if not id then return nil end
-	if kind == "Creature" or kind == "Vehicle" then return id end
-	if kind == "GameObject" then return "o" .. id end
+	if kind == "GameObject" and id then return "o" .. id end
 	return nil
 end
 
@@ -271,6 +275,7 @@ local function ReadLoot()
 						entry.items[id] = (entry.items[id] or 0) + 1
 					end
 				end
+				if ns.Gear and ns.Gear.SourcesChanged then ns.Gear.SourcesChanged() end
 			end
 		end
 	end
@@ -320,6 +325,7 @@ local function ReadMerchant()
 			if link then Collector.See(link) end
 		end
 	end
+	if ns.Gear and ns.Gear.SourcesChanged then ns.Gear.SourcesChanged() end
 end
 
 -- MERCHANT_UPDATE comes in bursts
@@ -510,11 +516,3 @@ ns.Command("collect", "Collected data counts", function()
 	ns.Print("Collecting: " .. (ns.db.collect and "on" or "off"))
 end, true)
 
--- Old or broken saved data: keep the shape.
-ns.OnLoad(function()
-	local data = ns.db.collected
-	data.v = 1
-	for kind in pairs(CAP) do
-		if type(data[kind]) ~= "table" then data[kind] = {} end
-	end
-end)
