@@ -1,5 +1,11 @@
 # Changelog
 
+## 16001-0.1.13
+
+- Upgrades: a score above the slot list, "Your gear score is: 71.23 (Great)", with a bar. It is the worn gear against the best items for your level and spec. Five colored bands: Average, Good, Great, Excellent, Best (100 only with the best item in every slot).
+- The version shows beside the window title.
+- "Items per slot" is 15 for new installs. Saved settings stay as they are.
+
 ## 16001-0.1.12
 
 - History: a "Share" column in the player table, each player's part of all wins in the run.
