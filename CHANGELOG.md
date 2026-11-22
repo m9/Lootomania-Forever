@@ -1,5 +1,10 @@
 # Changelog
 
+## 16001-0.1.12
+
+- History: a "Share" column in the player table, each player's part of all wins in the run.
+- History: runs from dungeons and raids carry a "Dungeon" or "Raid" label. Filter buttons above the list: All, Dungeons, Raids, World.
+
 ## 16001-0.1.11
 
 - Less work while farming: the lists and tooltips refresh only when a drop chance can appear, not after every kill.
