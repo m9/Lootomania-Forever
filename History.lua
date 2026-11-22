@@ -593,12 +593,16 @@ end
 
 function H.Current() return current end
 
--- Players of a run: list of { name, class, won, need, greed, pass, me }, most wins first.
+-- Players of a run: list of { name, class, won, share, need, greed, pass, me }, most wins first.
+-- share: percent of all wins in the table; nil when nobody won.
 function H.Players(run)
 	local list = {}
 	for name, p in pairs(run and run.players or {}) do
 		list[#list + 1] = { name = name, class = p.c, won = p.won or 0, need = p.need or 0, greed = p.greed or 0, pass = p.pass or 0, me = p.me }
 	end
+	local total = 0
+	for _, p in ipairs(list) do total = total + p.won end
+	for _, p in ipairs(list) do p.share = total > 0 and math.floor(p.won / total * 100 + 0.5) or nil end
 	table.sort(list, function(a, b)
 		if a.won ~= b.won then return a.won > b.won end
 		return a.name < b.name
@@ -722,7 +726,9 @@ local function RunRow(i)
 	row.over:Hide()
 	row.zone = UI.Text(row, "GameFontHighlight", C.GOLD_SOFT)
 	row.zone:SetPoint("TOPLEFT", 8, -4)
-	row.zone:SetPoint("RIGHT", -6, 0)
+	row.zone:SetPoint("RIGHT", -64, 0)
+	row.tag = UI.Text(row, "GameFontHighlightSmall", C.MUTED)
+	row.tag:SetPoint("TOPRIGHT", -6, -6)
 	row.info = UI.Text(row, "GameFontHighlightSmall", C.MUTED)
 	row.info:SetPoint("BOTTOMLEFT", 8, 5)
 	row.info:SetPoint("RIGHT", -6, 0)
@@ -788,7 +794,8 @@ local function DropRow(i)
 	return row
 end
 
-local COLUMNS = { { "won", "Won" }, { "need", "Need" }, { "greed", "Greed" }, { "pass", "Pass" } }
+local COLUMNS = { { "won", "Won" }, { "share", "Share" }, { "need", "Need" }, { "greed", "Greed" }, { "pass", "Pass" } }
+local COLUMN_X, COLUMN_STEP = 190, 70
 
 local function PlayerRow(i)
 	local row = CreateFrame("Frame", nil, view.players.content)
@@ -797,12 +804,12 @@ local function PlayerRow(i)
 	row:SetPoint("TOPRIGHT", 0, -(i - 1) * PLAYER_STEP)
 	row.name = UI.Text(row, "GameFontHighlightSmall", C.TEXT)
 	row.name:SetPoint("LEFT", 8, 0)
-	row.name:SetWidth(180)
+	row.name:SetWidth(170)
 	row.cells = {}
 	for n, column in ipairs(COLUMNS) do
 		local cell = UI.Text(row, "GameFontHighlightSmall", C.TEXT)
-		cell:SetPoint("LEFT", 200 + (n - 1) * 80, 0)
-		cell:SetWidth(70)
+		cell:SetPoint("LEFT", COLUMN_X + (n - 1) * COLUMN_STEP, 0)
+		cell:SetWidth(COLUMN_STEP - 10)
 		row.cells[column[1]] = cell
 	end
 	return row
@@ -835,13 +842,26 @@ local function FillDrop(row, drop, where)
 	end
 end
 
+-- Kinds the list can be cut to: key, label, the run kind it keeps (nil: all)
+local FILTERS = { { "all", "All" }, { "party", "Dungeons" }, { "raid", "Raids" }, { "world", "World" } }
+
 function view.Fill()
 	local runs = H.Runs()
-	local found = false
+	local kind = view.filter
+	if kind and kind ~= "all" then
+		local kept = {}
+		for _, run in ipairs(runs) do
+			if run.kind == kind then kept[#kept + 1] = run end
+		end
+		runs = kept
+	end
+	for _, button in ipairs(view.filters or {}) do button:SetOn(button.key == (kind or "all")) end
+	local found, hasCurrent = false, false
 	for _, run in ipairs(runs) do
 		if run == view.selected then found = true end
+		if run == current then hasCurrent = true end
 	end
-	if not found then view.selected = current or runs[1] end
+	if not found then view.selected = hasCurrent and current or runs[1] end
 	-- a search shows the drops of every run in place of one run's
 	local query = view.find and view.find:GetText() or ""
 	local hits = query:match("%S") and H.Find(query) or nil
@@ -853,12 +873,14 @@ function view.Fill()
 		row.on:SetShown(r == run)
 		row.zone:SetText(r.zone or "?")
 		UI.Color(row.zone, r == current and C.GOLD or C.GOLD_SOFT)
+		row.tag:SetText(r.kind == "party" and "Dungeon" or r.kind == "raid" and "Raid" or "")
 		-- a run of another character says whose
 		local who = r.char and ns.player and r.char ~= ns.player.full and (", " .. Short(r.char)) or ""
 		row.info:SetText(date("%d %b %H:%M", r.start) .. ", " .. Minutes(r) .. " min, " .. Plural(#r.drops, "drop", "drops") .. who)
 	end
 	view.runPool:HideFrom(#runs + 1)
 	view.runs.content:SetHeight(math.max(1, #runs * RUN_STEP))
+	view.none:SetText((kind and kind ~= "all" and #H.Runs() > 0) and "No runs of this kind." or "No runs yet.\nLoot rolls of your group are recorded here.")
 	view.none:SetShown(#runs == 0)
 
 	view.post:SetShown(run ~= nil)
@@ -910,8 +932,10 @@ function view.Fill()
 		row.name:SetText(UI.Colored(Short(p.name), UI.ClassColor(p.class)) .. (p.me and UI.Colored(" (you)", C.FAINT) or ""))
 		for _, column in ipairs(COLUMNS) do
 			local value = p[column[1]]
-			row.cells[column[1]]:SetText(value)
-			UI.Color(row.cells[column[1]], value > 0 and (column[1] == "won" and C.GOLD or C.TEXT) or C.FAINT)
+			local shown = column[1] == "share" and (value and value .. "%" or "-") or value
+			row.cells[column[1]]:SetText(shown)
+			local on = (value or 0) > 0
+			UI.Color(row.cells[column[1]], on and ((column[1] == "won" or column[1] == "share") and C.GOLD or C.TEXT) or C.FAINT)
 		end
 	end
 	view.playerPool:HideFrom(#players + 1)
@@ -936,11 +960,25 @@ local function BuildTab(panel)
 	view.find:HookScript("OnEditFocusGained", Ask)
 	view.find:HookScript("OnEditFocusLost", Ask)
 	view.runs = UI.Scroll(runBox)
-	view.runs:SetPoint("TOPLEFT", 4, -30)
+	-- cut the list to dungeons, raids or the open world
+	view.filters = {}
+	local previous
+	for _, def in ipairs(FILTERS) do
+		local button = UI.Button(runBox, def[2], #def[2] * 7 + 16, 20)
+		button.key = def[1]
+		if previous then button:SetPoint("LEFT", previous, "RIGHT", 2, 0) else button:SetPoint("TOPLEFT", 4, -30) end
+		button:SetScript("OnClick", function()
+			view.filter = def[1]
+			view.Fill()
+		end)
+		view.filters[#view.filters + 1] = button
+		previous = button
+	end
+	view.runs:SetPoint("TOPLEFT", 4, -54)
 	view.runs:SetPoint("BOTTOMRIGHT", -16, 4)
 	view.runPool = UI.Pool(RunRow)
 	view.none = UI.Text(runBox, "GameFontHighlightSmall", C.FAINT)
-	view.none:SetPoint("TOP", 0, -40)
+	view.none:SetPoint("TOP", 0, -64)
 	view.none:SetWidth(LEFT - 24)
 	view.none:SetText("No runs yet.\nLoot rolls of your group are recorded here.")
 
@@ -1006,7 +1044,7 @@ local function BuildTab(panel)
 	head:SetText("Player")
 	for n, column in ipairs(COLUMNS) do
 		local label = UI.Text(playerBox, "GameFontHighlightSmall", C.GOLD_SOFT)
-		label:SetPoint("TOPLEFT", 204 + (n - 1) * 80, -8)
+		label:SetPoint("TOPLEFT", COLUMN_X + 4 + (n - 1) * COLUMN_STEP, -8)
 		label:SetText(column[2])
 	end
 	view.players = UI.Scroll(playerBox)

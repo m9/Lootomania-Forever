@@ -1,7 +1,7 @@
 ## Interface: 16001
 ## Title: Lootomania
 ## Notes: Gear upgrades, loot sources and loot rolls.
-## Version: 16001-0.1.11
+## Version: 16001-0.1.12
 ## Category: Loot
 ## IconTexture: Interface\Icons\INV_Misc_Bag_10_Green
 ## SavedVariables: LootomaniaDB
