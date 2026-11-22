@@ -270,12 +270,15 @@ local function ReadLoot()
 					entry.zone, entry.inst = zone or nil, inst
 				end
 				entry.items = entry.items or {}
+				-- chances show from 10 kills (Gear.SeenChance): refresh only when one can appear
+				local changed = entry.n == 10
 				for id in pairs(items) do
 					if entry.items[id] or Count(entry.items) < CAP_PER_SOURCE then
+						if not entry.items[id] and entry.n >= 10 then changed = true end
 						entry.items[id] = (entry.items[id] or 0) + 1
 					end
 				end
-				if ns.Gear and ns.Gear.SourcesChanged then ns.Gear.SourcesChanged() end
+				if changed and ns.Gear and ns.Gear.SourcesChanged then ns.Gear.SourcesChanged() end
 			end
 		end
 	end

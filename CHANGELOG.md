@@ -1,5 +1,9 @@
 # Changelog
 
+## 16001-0.1.11
+
+- Less work while farming: the lists and tooltips refresh only when a drop chance can appear, not after every kill.
+
 ## 16001-0.1.10
 
 - Tooltips refresh after a quest hand-in. The Tracked and History tabs and the side panel redraw when gear or spec changes.
