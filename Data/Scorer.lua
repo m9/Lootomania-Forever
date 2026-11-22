@@ -38,6 +38,21 @@ local HEALTH_SHARE = 0.35
 
 local cache = setmetatable({}, { __mode = "k" })
 
+-- Keys of a table in sorted order, into a reused list (no garbage per call). Float sums must add
+-- in a fixed order: `pairs` order changes between processes (LuaJIT seeds its string hash), and a
+-- different order moves a score in its last bit, enough to flip the two-decimal rounding.
+local scratch = {}
+local function SortedKeys(t)
+	local n = 0
+	for k in pairs(t) do
+		n = n + 1
+		scratch[n] = k
+	end
+	for i = #scratch, n + 1, -1 do scratch[i] = nil end
+	table.sort(scratch)
+	return scratch, n
+end
+
 -- Final weights of one spec: base weights, levelling multipliers, derived weights.
 local function effective(rec, weights, level)
 	local lv = weights.levelling
@@ -58,7 +73,8 @@ local function effective(rec, weights, level)
 	local fold = flags.agiFold
 	if fold then
 		local add = 0
-		for k, f in pairs(fold) do add = add + (w[k] or 0) * f end
+		local keys, n = SortedKeys(fold)
+		for i = 1, n do add = add + (w[keys[i]] or 0) * fold[keys[i]] end
 		w.agi = (w.agi or 0) + add
 	end
 	-- Attack power against one creature type is worth a third of plain attack power.
@@ -75,9 +91,11 @@ local TWINS = { { "hit", "spellHit" }, { "crit", "spellCrit" } }
 
 local function statSum(stats, w)
 	local s = 0
-	for k, v in pairs(stats) do
+	local keys, n = SortedKeys(stats)
+	for i = 1, n do
+		local k = keys[i]
 		local wk = w[WEIGHT_KEY[k] or k]
-		if wk then s = s + v * wk end
+		if wk then s = s + stats[k] * wk end
 	end
 	for i = 1, #TWINS do
 		local a, b = stats[TWINS[i][1]], stats[TWINS[i][2]]

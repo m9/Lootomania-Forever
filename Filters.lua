@@ -3,7 +3,7 @@ local _, ns = ...
 -- Play-style filters for the upgrade lists. Saved per character:
 --   ns.char.filters = {
 --     on    = { presetKey = true },   -- active presets
---     kinds = { kind = false },       -- source kinds that are hidden
+--     kinds = { kind = false },       -- source kinds that are hidden; true: shown, for a kind hidden by default
 --     zone  = "Zone name" or nil,     -- focus zone; nil: the zone the player is in
 --     vendors = { type = false },     -- vendor types that are hidden: gold, rep, pvp, currency
 --   }
@@ -17,44 +17,36 @@ ns.Filters = F
 ns.Defaults({ filters = { on = {}, kinds = {} } }, "char")
 
 F.PRESETS = {
-	{ key = "noDungeons", label = "No dungeons", tip = "Hide dungeon loot." },
 	{ key = "noRaids", label = "No raids", tip = "Hide raid loot." },
-	{ key = "dungeonsOnly", label = "Dungeons only", tip = "Only dungeon loot." },
-	{ key = "buyOnly", label = "Buy only", tip = "Only vendor items." },
 	{ key = "nearLevel", label = "Near my level", tip = "Hide quests and dungeons over 4 levels above me." },
 	{ key = "noCraftBop", label = "No crafted BoP", tip = "Hide crafted items that bind on pickup." },
-	{ key = "noEnemyCity", label = "No enemy cities", tip = "Hide sources in enemy cities." },
+	{ key = "noEnemyCity", label = "No enemy cities", tip = "Hide sources in the other faction's cities." },
 	-- not in the filters window: the zone box sets it ("Anywhere" is off)
 	{ key = "focusZone", label = "Zone", tip = "Only sources in one zone.", hidden = true },
 	-- "No profession gear" in the filters window
 	{ key = "noProfession", label = "Profession gear", tip = "Hide gear that needs a profession to wear.", hidden = true },
 }
 
--- Turning one on turns these off.
-local EXCLUDES = {
-	noDungeons = { "dungeonsOnly" },
-	dungeonsOnly = { "noDungeons", "buyOnly" },
-	buyOnly = { "dungeonsOnly" },
-}
-
-F.KINDS = { "boss", "drop", "rare", "object", "quest", "vendor", "craft", "world", "unknown" }
+F.KINDS = { "boss", "drop", "rare", "object", "quest", "vendor", "craft", "world", "unknown", "closed" }
 local KIND_LABEL = {
-	boss = "Boss", drop = "Drop", rare = "Rare", object = "Object", quest = "Quest", vendor = "Vendor",
-	craft = "Craft", world = "World", unknown = "Unknown",
+	boss = "Boss", drop = "Drop", rare = "Rare", object = "Chest or box", quest = "Quest", vendor = "Vendor",
+	craft = "Craft", world = "World drop", unknown = "No known source", closed = "Raid not open",
 }
+-- What a source kind means, for the filters window.
+local KIND_TIP = {
+	boss = "Dungeon and raid bosses.", drop = "Creatures that are not bosses.", rare = "Rare creatures.",
+	object = "Chests, boxes and other things to open.", quest = "Quest rewards.", vendor = "Sold by a vendor; which kinds: the next column.",
+	craft = "Made with a profession.", world = "Dropped by many creatures of a level range.",
+	unknown = "Items the data has no source for.", closed = "Items from raids that are not open yet.",
+}
+-- Hidden until the player asks for them: an item nobody can say how to get, or cannot be got yet.
+local HIDDEN_BY_DEFAULT = { unknown = true, closed = true }
 
 -- Vendor types (Gear.VENDOR_TYPES), for the filters window.
 F.VENDORS = { "gold", "rep", "pvp", "currency" }
 local VENDOR_LABEL = { gold = "Gold", rep = "Reputation", pvp = "PvP rank", currency = "Other currency" }
 
 local NEAR_LEVELS = 4
-
-local RAID_MAPS = { [249] = true, [309] = true, [409] = true, [469] = true, [509] = true, [531] = true, [533] = true }
-local RAID_NAMES = {
-	["Molten Core"] = true, ["Onyxia's Lair"] = true, ["Blackwing Lair"] = true, ["Zul'Gurub"] = true,
-	["Ruins of Ahn'Qiraj"] = true, ["Temple of Ahn'Qiraj"] = true, ["Ahn'Qiraj"] = true,
-	["Ahn'Qiraj Temple"] = true, ["Naxxramas"] = true,
-}
 
 -- Cities by the faction that owns them.
 local CITIES = {
@@ -98,6 +90,8 @@ local function Saved()
 	if type(f.on) ~= "table" then f.on = {} end
 	if type(f.kinds) ~= "table" then f.kinds = {} end
 	if type(f.vendors) ~= "table" then f.vendors = {} end
+	-- rules that were removed (2026-11-22)
+	f.on.noDungeons, f.on.dungeonsOnly, f.on.buyOnly = nil, nil, nil
 	return f
 end
 
@@ -129,7 +123,7 @@ local function Compile()
 		end
 	end
 	for _, kind in ipairs(F.KINDS) do
-		if f.kinds[kind] == false then
+		if not F.KindShown(kind) then
 			new.kindOff[kind] = true
 			new.any = true
 		end
@@ -165,21 +159,27 @@ function F.Set(key, on)
 	local f = Saved()
 	if not f then return end
 	f.on[key] = on and true or nil
-	if on then
-		for _, other in ipairs(EXCLUDES[key] or {}) do f.on[other] = nil end
-	end
 	Changed()
 end
 
 function F.KindShown(kind)
 	local f = Saved()
-	return not (f and f.kinds[kind] == false)
+	local saved = f and f.kinds[kind]
+	if HIDDEN_BY_DEFAULT[kind] then return saved == true end
+	return saved ~= false
 end
 
 function F.SetKind(kind, shown)
 	local f = Saved()
 	if not f then return end
-	if shown then f.kinds[kind] = nil else f.kinds[kind] = false end
+	-- only what differs from the default is saved
+	if HIDDEN_BY_DEFAULT[kind] then
+		f.kinds[kind] = shown and true or nil
+	elseif shown then
+		f.kinds[kind] = nil
+	else
+		f.kinds[kind] = false
+	end
 	Changed()
 end
 
@@ -215,7 +215,7 @@ function F.Reset()
 	Changed()
 end
 
--- How many filters are on.
+-- How many filters are on: what the player switched to hide things. Kinds hidden by default do not count.
 function F.Active()
 	local f = Saved()
 	local n = 0
@@ -232,11 +232,6 @@ end
 
 -- Test ----------------------------------------------------------------------------------
 
-local function IsRaid(s)
-	if s.raid ~= nil then return s.raid and true or false end
-	return RAID_MAPS[s.instMap] or RAID_NAMES[s.inst] or false
-end
-
 local function IsBop(entry)
 	if entry.bind ~= nil then return entry.bind == 1 end
 	local g = ns.Gear
@@ -247,24 +242,21 @@ end
 
 local NO_SOURCE = { kind = "unknown" }
 local ENEMY = { Alliance = "Horde", Horde = "Alliance" }
-local SIDE = { Alliance = "A", Horde = "H" }
 
 local function SourcePass(s, entry, level, faction, anyZone)
 	local kind = s.kind or "unknown"
 	if st.kindOff[kind] then return false end
 	if kind == "vendor" and st.vendorOff[s.vendor or "gold"] then return false end
 	local inst = s.inst ~= nil or s.instMap ~= nil
-	local raid = inst and IsRaid(s)
-	if st.noDungeons and inst and not raid then return false end
+	-- In a dungeon or raid: the source stands there, or its quest cannot be done without it.
+	-- A PvP hall or battleground has an instance but is neither.
+	local raid = s.instKind == "raid" or s.needsKind == "raid"
 	if st.noRaids and raid then return false end
-	if st.dungeonsOnly and (not inst or raid) then return false end
-	if st.buyOnly and kind ~= "vendor" then return false end
 	if st.nearLevel and level and s.level and (kind == "quest" or inst) and s.level > level + NEAR_LEVELS then return false end
 	if st.noCraftBop and kind == "craft" and IsBop(entry) then return false end
 	if st.noEnemyCity and faction then
 		local cities = CITIES[ENEMY[faction]]
 		if cities and s.zone and cities[s.zone] then return false end
-		if s.side and SIDE[faction] and s.side ~= SIDE[faction] then return false end
 	end
 	if st.focusZone and not anyZone then
 		local zone = st.zone
@@ -279,9 +271,17 @@ local function SourcePass(s, entry, level, faction, anyZone)
 	return true
 end
 
--- True when at least one source of the item passes. An item without a known source
--- counts as one source of kind "unknown". anyZone: the zone filter is left out.
-function F.Pass(entry, sources, ctx, anyZone)
+-- True when at least one source of the item passes, and that source. An item without a known
+-- source counts as one source of kind "unknown". anyZone: the zone filter is left out.
+-- plain: the player's own choices are left out; only what is hidden by default stays hidden
+-- (no known source, a raid that is not open). For a list that has no filter bar of its own.
+function F.Pass(entry, sources, ctx, anyZone, plain)
+	if plain then
+		for i = 1, type(sources) == "table" and #sources or 0 do
+			if not HIDDEN_BY_DEFAULT[sources[i].kind or "unknown"] then return true, sources[i] end
+		end
+		return false
+	end
 	if not st then
 		Compile()
 		if not st then return true end
@@ -293,7 +293,7 @@ function F.Pass(entry, sources, ctx, anyZone)
 	local level, faction = ctx and ctx.level, ctx and ctx.faction
 	if type(sources) ~= "table" or #sources == 0 then return SourcePass(NO_SOURCE, entry, level, faction, anyZone) end
 	for i = 1, #sources do
-		if SourcePass(sources[i], entry, level, faction, anyZone) then return true end
+		if SourcePass(sources[i], entry, level, faction, anyZone) then return true, sources[i] end
 	end
 	return false
 end
@@ -568,13 +568,17 @@ local bars = {}
 local ANY = "\1any" -- zone box value for "no zone filter"
 local HERE = "\1here" -- zone box value for "the zone I am in"
 
--- "Anywhere" and "Current zone", then every zone by name.
+-- "Anywhere" and "Current zone", then every zone by name. Made once: the box asks for it twice on
+-- every key typed.
+local zoneChoices
 local function ZoneChoices()
+	if zoneChoices then return zoneChoices end
 	local out = { { value = ANY, label = "Anywhere", pin = true }, { value = HERE, label = "Current zone", pin = true } }
 	local zones = {}
 	for i, zone in ipairs(F.Zones()) do zones[i] = zone end
 	table.sort(zones)
 	for _, zone in ipairs(zones) do out[#out + 1] = { value = zone, label = zone } end
+	if #zones > 0 then zoneChoices = out end
 	return out
 end
 
@@ -625,12 +629,14 @@ local function BuildWindow()
 			boxes[#boxes + 1] = check
 		end
 	end
-	column(0, "Sources", F.KINDS, function(kind)
+	-- a tick in the first two columns shows a kind of source; a tick in the third turns a rule on
+	column(0, "Show from", F.KINDS, function(kind)
 		local check = UI.Check(body, KIND_LABEL[kind], function(on) F.SetKind(kind, on) end)
 		check.read = function() return F.KindShown(kind) end
+		if KIND_TIP[kind] then UI.Tip(check, KIND_LABEL[kind], { KIND_TIP[kind] }) end
 		return check
 	end)
-	column(130, "Vendors", F.VENDORS, function(kind)
+	column(130, "Show vendors for", F.VENDORS, function(kind)
 		local check = UI.Check(body, VENDOR_LABEL[kind], function(on) F.SetVendor(kind, on) end)
 		check.read = function() return F.VendorShown(kind) end
 		return check
@@ -644,7 +650,7 @@ local function BuildWindow()
 	window.reset = UI.Button(body, "Reset", 64, 22)
 	window.reset:SetPoint("BOTTOMRIGHT", 0, 0)
 	window.reset:SetScript("OnClick", F.Reset)
-	UI.Tip(window.reset, "Reset filters", { "Everything shown, no rule, any zone." })
+	UI.Tip(window.reset, "Reset filters", { "Back to the default: no rule, any zone." })
 	window.note = UI.Text(body, "GameFontHighlightSmall", C.FAINT)
 	window.note:SetPoint("BOTTOMLEFT", 0, 4)
 	window.note:SetText("\"not confirmed\" on an item: its vendor's price is still being checked.")

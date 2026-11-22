@@ -3,12 +3,14 @@ local _, ns = ...
 -- Guide: a waypoint and an arrow to one spot.
 --   ns.Guide.Set(spot, label, itemId)   spot = { map = uiMapId, x =, y = }, x and y in 0-100.
 --                                       A Gear source (a table with .spots) works too.
---   ns.Guide.SetSource(source, itemId)  nearest spot of a source
+--   ns.Guide.SetSource(source, itemId, label)  nearest spot of a source the guide has not arrived at yet
+--   ns.Guide.Label(source)              what the place of a source is called: an instance's is its entrance
 --   ns.Guide.Clear()
 --   ns.Guide.Target()                   { map, x, y, label, item } or nil
 --   ns.Guide.Measure(spot)              yards, bearing (radians, 0 north, counterclockwise) or nil
 --   ns.Guide.Nearest(spots)             spot, yards (yards is nil when it cannot be measured)
 --   ns.Guide.Hint(spot)                 "120 yd NE" or nil
+-- The distance is known only on the target's own map. From elsewhere the box names the zone to go to.
 -- Sends "GUIDE_CHANGED".
 
 local UI = ns.UI
@@ -23,8 +25,20 @@ local ARROW = "Interface\\Minimap\\MiniMap-QuestArrow" -- points up
 ns.Main.AddOption({ group = "Map", key = "guideArrow", kind = "check", label = "Guide arrow", default = true })
 
 local target -- { map, x, y, label, item }
+local others -- the spots of the source the target is one of
+local visited = {} -- spots arrived at, by item or label: the next ask goes to another one
+local quiet = false -- a target set again after a reload says nothing in chat
 local way -- { tomtom = uid } or { user = true }
 local frame, driver
+
+local function SpotKey(spot) return ("%s:%.1f:%.1f"):format(tostring(spot.map), spot.x, spot.y) end
+
+-- The game's name of a map: the zone to travel to.
+local function Zone(map)
+	local info = map and C_Map and C_Map.GetMapInfo and C_Map.GetMapInfo(map)
+	local name = type(info) == "table" and ns.Plain(info.name) or nil
+	return type(name) == "string" and name ~= "" and name or nil
+end
 
 -- Positions ---------------------------------------------------------------------------
 
@@ -220,8 +234,8 @@ local function Facing()
 end
 
 local function Turn()
-	if not (frame and frame:IsShown() and bearing) then return end
-	local facing = Facing()
+	if not (frame and frame:IsShown()) then return end
+	local facing = bearing and Facing()
 	if not facing then
 		frame.arrow:Hide()
 		return
@@ -230,24 +244,39 @@ local function Turn()
 	frame.arrow:SetRotation(bearing - facing)
 end
 
+-- At the spot. It may be empty (a chest taken, a creature dead), so the spot is remembered and
+-- the next ask for the same thing goes to another one.
+local function Arrive()
+	local t = target
+	local key = t.item or t.label
+	visited[key] = visited[key] or {}
+	visited[key][SpotKey(t)] = true
+	local left = 0
+	for _, spot in ipairs(others or {}) do
+		if not visited[key][SpotKey(spot)] then left = left + 1 end
+	end
+	ns.Print("Arrived: " .. t.label .. (left > 0 and (". More spots: %d. Click again for the next one."):format(left) or ""))
+	Guide.Clear()
+end
+
 -- Reads the position: arrival, arrow text.
 local function Sample()
 	if not target then return end
 	local yards, angle = Guide.Measure(target)
 	if yards and yards < ARRIVE_YARDS then
-		ns.Print("Arrived: " .. target.label)
-		Guide.Clear()
+		Arrive()
 		return
 	end
 	bearing = angle
-	local show = yards and ns.db.guideArrow and not (way and way.tomtom)
+	local show = ns.db.guideArrow and not (way and way.tomtom)
 	if not show then
 		if frame then frame:Hide() end
 		return
 	end
 	if not frame then Build() end
 	frame.label:SetText(target.label)
-	frame.distance:SetText(Yards(yards))
+	-- from another zone there is no distance: the zone to go to
+	frame.distance:SetText(yards and Yards(yards) or Zone(target.map) or "Another zone")
 	frame:Show()
 	Turn()
 end
@@ -282,32 +311,68 @@ end
 function Guide.Clear()
 	if not target then return end
 	RemoveWaypoint()
-	target, bearing = nil, nil
+	target, bearing, others = nil, nil, nil
 	if ns.char then ns.char.guide = nil end
 	Drive(false)
 	if frame then frame:Hide() end
 	ns.Send("GUIDE_CHANGED", nil)
 end
 
+-- What the place of a source is called. A source in an instance has the entrance for a place:
+-- the boss is not standing there.
+function Guide.Label(source)
+	if type(source) ~= "table" then return nil end
+	if source.inst and source.instMap then return source.inst .. " entrance" end
+	return source.name or source.text
+end
+
+local function SetSpot(spot, label, itemId, spots)
+	if not (tonumber(spot.map) and tonumber(spot.x) and tonumber(spot.y)) then return false end
+	RemoveWaypoint()
+	target = { map = spot.map, x = spot.x, y = spot.y, label = label or "Target", item = itemId }
+	others = spots
+	if ns.char then ns.char.guide = target end
+	PlaceWaypoint()
+	Drive(true)
+	ns.Safe(Sample)
+	if target then
+		-- too far for a distance: say where it is, the arrow has nothing to show yet
+		if not quiet and not Guide.Measure(target) then
+			local zone = Zone(target.map)
+			ns.Print("Guide: " .. target.label .. (zone and (", " .. zone) or ""))
+		end
+		ns.Send("GUIDE_CHANGED", target)
+	end -- nil: already there, cleared
+	return true
+end
+
 function Guide.SetSource(source, itemId, label)
 	if type(source) ~= "table" then return false end
-	local spot = Guide.Nearest(source.spots)
+	local spots = source.spots
+	if type(spots) ~= "table" or not spots[1] then return false end
+	label = label or Guide.Label(source)
+	-- not a spot the guide arrived at before; when it has been to all of them, it starts over
+	local key = itemId or label
+	local seen, open = visited[key], spots
+	if seen then
+		open = {}
+		for i = 1, #spots do
+			if not seen[SpotKey(spots[i])] then open[#open + 1] = spots[i] end
+		end
+		if #open == 0 then
+			visited[key] = nil
+			open = spots
+		end
+	end
+	local spot = Guide.Nearest(open)
 	if not spot then return false end
-	return Guide.Set(spot, label or source.name or source.text, itemId)
+	return SetSpot(spot, label, itemId, spots)
 end
 
 function Guide.Set(spot, label, itemId)
 	if type(spot) ~= "table" then return false end
 	if spot.spots then return Guide.SetSource(spot, itemId, label) end
-	if not (tonumber(spot.map) and tonumber(spot.x) and tonumber(spot.y)) then return false end
-	RemoveWaypoint()
-	target = { map = spot.map, x = spot.x, y = spot.y, label = label or "Target", item = itemId }
-	if ns.char then ns.char.guide = target end
-	PlaceWaypoint()
-	Drive(true)
-	ns.Safe(Sample)
-	if target then ns.Send("GUIDE_CHANGED", target) end -- nil: already there, cleared
-	return true
+	return SetSpot(spot, label, itemId, nil)
 end
 
 ns.Listen("SETTINGS_CHANGED", function(key)
@@ -322,7 +387,11 @@ ns.OnLoad(function()
 		return
 	end
 	C_Timer.After(2, function()
-		if not target and ns.char.guide == saved then Guide.Set(saved, saved.label, saved.item) end
+		if not target and ns.char.guide == saved then
+			quiet = true
+			Guide.Set(saved, saved.label, saved.item)
+			quiet = false
+		end
 	end)
 end)
 

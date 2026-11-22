@@ -116,7 +116,8 @@ local function CloseOthers(except)
 end
 
 local function Start(zone, kind, id)
-	local run = { zone = zone, kind = kind, id = id, start = Now(), kills = {}, drops = {}, players = {} }
+	-- char: whose run it is; the history is one for all characters
+	local run = { zone = zone, kind = kind, id = id, start = Now(), kills = {}, drops = {}, players = {}, char = ns.player and ns.player.full or nil }
 	current = run
 	CloseOthers(run)
 	db.runs[#db.runs + 1] = run
@@ -166,6 +167,11 @@ local function Leave(run, tries)
 	run.left = run.left or Now()
 	C_Timer.After(LEAVE_WAIT, function()
 		if current ~= run or not run.left then return end
+		-- a wipe: the ghost is outside and walks back in. The run goes on while the character is dead.
+		if UnitIsDeadOrGhost and UnitIsDeadOrGhost("player") then
+			Leave(run, tries)
+			return
+		end
 		-- rolls still going: wait for them
 		if next(open) and (tries or 0) < 5 then
 			Leave(run, (tries or 0) + 1)
@@ -456,7 +462,8 @@ end)
 
 local function IsFinal(instanceID, eid)
 	local data = ns.Data and ns.Data.instances and instanceID and ns.Data.instances[instanceID]
-	local final = data and data.final
+	-- finals: the last boss of every version of the instance; final: the first of them
+	local final = data and (data.finals or data.final)
 	if type(final) == "table" then
 		for _, id in pairs(final) do
 			if id == eid then return true end
@@ -486,8 +493,11 @@ ns.On("ENCOUNTER_END", function(_, eid, name, _, _, success)
 	flushSoon()
 end)
 
+-- A run with no end: the one going on counts to now. One the game never closed (a reload inside,
+-- a login outside) ends where it last had something to record.
 local function Minutes(run)
-	return math.max(1, math.floor(((run.stop or run.final or Now()) - run.start) / 60 + 0.5))
+	local stop = run.stop or run.final or (run == current and Now()) or run.act or run.start
+	return math.max(1, math.floor((stop - run.start) / 60 + 0.5))
 end
 
 -- Summary lines. plain: no colours (for group chat). limit: most drop lines.
@@ -535,11 +545,12 @@ function H.Post(run)
 	if not channel then return false, "No group" end
 	local send = (C_ChatInfo and C_ChatInfo.SendChatMessage) or SendChatMessage
 	if not send then return false, "No chat" end
-	lastPost = GetTime()
 	local lines = H.Lines(run, true, POST_LINES)
 	lines[1] = "Lootomania: " .. lines[1]
-	for _, line in ipairs(lines) do
+	for i, line in ipairs(lines) do
 		if not pcall(send, line, channel) then return false, "Blocked" end
+		-- the wait starts once a line has gone out: a blocked post can be tried again at once
+		if i == 1 then lastPost = GetTime() end
 	end
 	return true
 end
@@ -547,18 +558,20 @@ end
 Announce = function(run)
 	run.told = #run.drops
 	if ns.db.historySummary ~= false then
-		for _, line in ipairs(H.Lines(run)) do ns.Print(line) end
+		-- as many lines as a post to the group: the rest is in the History tab
+		for _, line in ipairs(H.Lines(run, false, POST_LINES)) do ns.Print(line) end
 	end
-	if ns.db.historyAutoPost then H.Post(run) end
 end
 
--- After the final boss: tell once its loot is decided.
+-- After the final boss: tell once its loot is decided. Its own mark: a summary said earlier (the
+-- group walked out and back in) must not take the last one away.
 CheckSummary = function()
 	local run = current
-	if not run or not run.final or run.told then return end
+	if not run or not run.final or run.finalTold then return end
 	local age = Now() - run.final
 	if (run.finalSeen and not next(open)) or age >= FINAL_WAIT then
-		Announce(run)
+		run.finalTold = true
+		if #run.drops > (run.told or 0) then Announce(run) end
 		Touch()
 	end
 end
@@ -645,10 +658,13 @@ ns.Listen("SETTINGS_CHANGED", function(key)
 	end
 end)
 
-ns.Main.AddOption({ group = "History", key = "historyKeep", kind = "slider", label = "Keep runs", min = 5, max = 50, step = 1, format = "%d", default = 20 })
-ns.Main.AddOption({ group = "History", key = "historyWorld", kind = "check", label = "Record open world", default = true })
-ns.Main.AddOption({ group = "History", key = "historySummary", kind = "check", label = "Summary in chat", default = true, tip = "After the final boss or on leaving." })
-ns.Main.AddOption({ group = "History", key = "historyAutoPost", kind = "check", label = "Post summary to group", default = false })
+-- lazy: a smaller number deletes runs, so it applies when the mouse button comes up, not on the way
+ns.Main.AddOption({ group = "History", key = "historyKeep", kind = "slider", label = "Runs to keep", min = 5, max = 50, step = 1, format = "%d", default = 20,
+	lazy = true, keep = true, tip = "Older runs are deleted." })
+ns.Main.AddOption({ group = "History", key = "historyWorld", kind = "check", label = "Record open world", default = true,
+	tip = "Off: rolls outside dungeons and raids are left out of History, Luck and the roll counts of tracked items." })
+ns.Main.AddOption({ group = "History", key = "historySummary", kind = "check", label = "Summary in chat", default = true,
+	tip = "After the final boss or on leaving. Ten drops at most; the rest is on the History tab." })
 
 -- Tab -------------------------------------------------------------------------------------------
 
@@ -662,6 +678,20 @@ local function ItemName(drop)
 	return name or ("Item " .. tostring(drop.id or "?"))
 end
 
+-- Drops of every run whose item name has the text in it, the newest first: { { drop = , run = } }.
+function H.Find(text)
+	local out = {}
+	text = type(text) == "string" and text:lower():match("^%s*(.-)%s*$") or ""
+	if text == "" then return out end
+	for _, run in ipairs(H.Runs()) do
+		for i = #run.drops, 1, -1 do
+			local drop = run.drops[i]
+			if ItemName(drop):lower():find(text, 1, true) then out[#out + 1] = { drop = drop, run = run } end
+		end
+	end
+	return out
+end
+
 local function RollText(row)
 	local text = row.ch and LABEL[row.ch] or "No roll"
 	if row.r then text = text .. " " .. row.r end
@@ -670,6 +700,8 @@ end
 
 local function Select(run)
 	view.selected = run
+	-- a run picked from the list ends a search
+	if view.find and view.find:GetText() ~= "" then view.find:SetText("") end
 	view.Fill()
 end
 
@@ -707,7 +739,14 @@ local function DropRow(i)
 	row.icon:SetPoint("LEFT", 3, 0)
 	row.icon:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 	row.icon.onClick = function(self, button)
-		if button == "RightButton" and ns.Wish and self.item then ns.Wish.Toggle(self.item) end
+		if not self.item then return end
+		if button == "RightButton" then
+			if ns.Wanted then ns.Wanted.Toggle(self.item) end
+		elseif ns.Side and ns.Side.Item then
+			-- how to get it again, in the side panel
+			local id = ns.ItemID(self.item)
+			if id then ns.Side.Item(id) end
+		end
 	end
 	row.name = UI.Text(row, "GameFontHighlight", C.TEXT)
 	row.name:SetPoint("TOPLEFT", row.icon, "TOPRIGHT", 8, -1)
@@ -764,6 +803,33 @@ local function PlayerRow(i)
 	return row
 end
 
+-- One drop in the list on the right. where: the text under the name (the boss, or the run).
+local function FillDrop(row, drop, where)
+	row.drop = drop
+	row.icon:SetItem(drop.link or drop.id)
+	local quality = drop.id and C_Item.GetItemQualityByID(drop.id)
+	row.name:SetText(ItemName(drop))
+	UI.Color(row.name, quality and UI.QUALITY[quality] or C.TEXT)
+	-- still an upgrade for the player: its gain after the boss
+	local worth, delta
+	if drop.id and ns.Tracker and ns.Tracker.Worth then worth, delta = ns.Tracker.Worth(drop.id) end
+	row.boss:SetText(where .. (worth and delta and delta > 0 and ("   " .. worth) or ""))
+	local w = drop.winner
+	if w then
+		row.win:SetText(UI.Colored(Short(w.n), UI.ClassColor(w.c)) .. "  " .. RollText(w))
+	else
+		row.win:SetText(UI.Colored("All passed", C.FAINT))
+	end
+	local me = drop.me
+	if me and me.w then
+		row.mine:SetText(UI.Colored("Won", C.GREEN))
+	elseif me and me.ch then
+		row.mine:SetText("You: " .. RollText(me))
+	else
+		row.mine:SetText("")
+	end
+end
+
 function view.Fill()
 	local runs = H.Runs()
 	local found = false
@@ -771,7 +837,10 @@ function view.Fill()
 		if run == view.selected then found = true end
 	end
 	if not found then view.selected = current or runs[1] end
-	local run = view.selected
+	-- a search shows the drops of every run in place of one run's
+	local query = view.find and view.find:GetText() or ""
+	local hits = query:match("%S") and H.Find(query) or nil
+	local run = not hits and view.selected or nil
 
 	for i, r in ipairs(runs) do
 		local row = view.runPool:Get(i)
@@ -779,7 +848,9 @@ function view.Fill()
 		row.on:SetShown(r == run)
 		row.zone:SetText(r.zone or "?")
 		UI.Color(row.zone, r == current and C.GOLD or C.GOLD_SOFT)
-		row.info:SetText(date("%d %b %H:%M", r.start) .. ", " .. Minutes(r) .. " min, " .. Plural(#r.drops, "drop", "drops"))
+		-- a run of another character says whose
+		local who = r.char and ns.player and r.char ~= ns.player.full and (", " .. Short(r.char)) or ""
+		row.info:SetText(date("%d %b %H:%M", r.start) .. ", " .. Minutes(r) .. " min, " .. Plural(#r.drops, "drop", "drops") .. who)
 	end
 	view.runPool:HideFrom(#runs + 1)
 	view.runs.content:SetHeight(math.max(1, #runs * RUN_STEP))
@@ -788,11 +859,28 @@ function view.Fill()
 	view.post:SetShown(run ~= nil)
 	view.delete:SetShown(run ~= nil)
 	view.playerBox:SetShown(run ~= nil)
+	if hits then
+		local inRuns, seen = 0, {}
+		for i, hit in ipairs(hits) do
+			if not seen[hit.run] then seen[hit.run], inRuns = true, inRuns + 1 end
+			FillDrop(view.dropPool:Get(i), hit.drop, (hit.run.zone or "?") .. ", " .. date("%d %b", hit.run.start))
+		end
+		view.title:SetText("Found: " .. #hits)
+		view.info:SetText(#hits > 0 and ("In " .. Plural(inRuns, "run", "runs")) or "")
+		view.dropPool:HideFrom(#hits + 1)
+		view.drops.content:SetHeight(math.max(1, #hits * DROP_STEP))
+		view.empty:SetText("Nothing found")
+		view.empty:SetShown(#hits == 0)
+		view.playerPool:HideFrom(1)
+		return
+	end
+	view.empty:SetText("No drops")
 	if not run then
 		view.title:SetText("")
 		view.info:SetText("")
 		view.dropPool:HideFrom(1)
 		view.playerPool:HideFrom(1)
+		view.empty:Hide()
 		return
 	end
 
@@ -804,29 +892,8 @@ function view.Fill()
 	-- newest drop first
 	local n = 0
 	for i = #run.drops, 1, -1 do
-		local drop = run.drops[i]
 		n = n + 1
-		local row = view.dropPool:Get(n)
-		row.drop = drop
-		row.icon:SetItem(drop.link or drop.id)
-		local quality = drop.id and C_Item.GetItemQualityByID(drop.id)
-		row.name:SetText(ItemName(drop))
-		UI.Color(row.name, quality and UI.QUALITY[quality] or C.TEXT)
-		row.boss:SetText(drop.boss or "Trash")
-		local w = drop.winner
-		if w then
-			row.win:SetText(UI.Colored(Short(w.n), UI.ClassColor(w.c)) .. "  " .. RollText(w))
-		else
-			row.win:SetText(UI.Colored("All passed", C.FAINT))
-		end
-		local me = drop.me
-		if me and me.w then
-			row.mine:SetText(UI.Colored("Won", C.GREEN))
-		elseif me and me.ch then
-			row.mine:SetText("You: " .. RollText(me))
-		else
-			row.mine:SetText("")
-		end
+		FillDrop(view.dropPool:Get(n), run.drops[i], run.drops[i].boss or "Trash")
 	end
 	view.dropPool:HideFrom(n + 1)
 	view.drops.content:SetHeight(math.max(1, n * DROP_STEP))
@@ -835,7 +902,7 @@ function view.Fill()
 	local players = H.Players(run)
 	for i, p in ipairs(players) do
 		local row = view.playerPool:Get(i)
-		row.name:SetText(UI.Colored(Short(p.name), UI.ClassColor(p.class)))
+		row.name:SetText(UI.Colored(Short(p.name), UI.ClassColor(p.class)) .. (p.me and UI.Colored(" (you)", C.FAINT) or ""))
 		for _, column in ipairs(COLUMNS) do
 			local value = p[column[1]]
 			row.cells[column[1]]:SetText(value)
@@ -853,13 +920,24 @@ local function BuildTab(panel)
 	local runBox = UI.Box(panel)
 	runBox:SetPoint("TOPLEFT", 0, 0)
 	runBox:SetSize(LEFT, height)
+	-- a search over every run, above the list of runs
+	view.find = UI.Edit(runBox, LEFT - 8, function() view.Fill() end)
+	view.find:SetPoint("TOPLEFT", 4, -4)
+	local ask = UI.Text(view.find, "GameFontHighlightSmall", C.FAINT)
+	ask:SetPoint("LEFT", 6, 0)
+	ask:SetText("Find an item in all runs")
+	local function Ask() ask:SetShown(view.find:GetText() == "" and not view.find:HasFocus()) end
+	view.find:HookScript("OnTextChanged", Ask)
+	view.find:HookScript("OnEditFocusGained", Ask)
+	view.find:HookScript("OnEditFocusLost", Ask)
 	view.runs = UI.Scroll(runBox)
-	view.runs:SetPoint("TOPLEFT", 4, -4)
+	view.runs:SetPoint("TOPLEFT", 4, -30)
 	view.runs:SetPoint("BOTTOMRIGHT", -16, 4)
 	view.runPool = UI.Pool(RunRow)
 	view.none = UI.Text(runBox, "GameFontHighlightSmall", C.FAINT)
-	view.none:SetPoint("TOP", 0, -14)
-	view.none:SetText("No runs")
+	view.none:SetPoint("TOP", 0, -40)
+	view.none:SetWidth(LEFT - 24)
+	view.none:SetText("No runs yet.\nLoot rolls of your group are recorded here.")
 
 	view.title = UI.Heading(panel, 18)
 	view.title:SetPoint("TOPLEFT", LEFT + 12, -2)
@@ -928,7 +1006,7 @@ local function BuildTab(panel)
 
 	local hint = UI.Text(panel, "GameFontHighlightSmall", C.FAINT)
 	hint:SetPoint("LEFT", view.info, "RIGHT", 14, 0)
-	hint:SetText("Right-click item: wishlist")
+	hint:SetText("Click item: how to get it. Right-click: track")
 end
 
 ns.Main.AddTab("history", "History", 300, BuildTab, function() view.Fill() end)
@@ -941,6 +1019,9 @@ ns.Command("history", "History. Also: post, clear", function(rest)
 		local ok, why = H.Post()
 		if not ok then ns.Print("Post: " .. tostring(why)) end
 	elseif rest == "clear" then
+		-- every run goes: asked for twice, as the Delete button does
+		ns.Print(("History: %d runs. To delete them all: /lm history clear yes"):format(#H.Runs()))
+	elseif rest == "clear yes" then
 		H.Clear()
 		ns.Print("History: cleared")
 	else

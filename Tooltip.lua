@@ -13,16 +13,21 @@ local C = UI.C
 local Tip = {}
 ns.Tip = Tip
 
-ns.Main.AddOption({ group = "Tooltips", key = "tipOn", kind = "check", label = "Item score", default = true })
-ns.Main.AddOption({ group = "Tooltips", key = "tipSource", kind = "check", label = "Item source", default = true })
-ns.Main.AddOption({ group = "Tooltips", key = "tipEnchant", kind = "check", label = "Best enchant", default = true })
-ns.Main.AddOption({ group = "Tooltips", key = "tipSuffix", kind = "check", label = "Suffix stats", default = true })
-ns.Main.AddOption({ group = "Tooltips", key = "tipOtherSpecs", kind = "check", label = "Ranks for other specs", default = true })
-ns.Main.AddOption({ group = "Tooltips", key = "tipStats", kind = "check", label = "Stat changes", default = true })
-ns.Main.AddOption({ group = "Tooltips", key = "tipHideDelta", kind = "check", label = "Hide the game's stat changes", default = true,
-	tip = "The \"If you replace this item\" lines of the compare tooltip." })
+ns.Main.AddOption({ group = "Item tooltips", key = "tipOn", kind = "check", label = "Rank and gain", default = true,
+	tip = "Off: the addon adds nothing to item tooltips." })
+ns.Main.AddOption({ group = "Item tooltips", key = "tipSource", kind = "check", label = "Source", default = true,
+	tip = "Where the item comes from." })
+ns.Main.AddOption({ group = "Item tooltips", key = "tipEnchant", kind = "check", label = "Recommended enchant", default = true,
+	tip = "On what you wear and on upgrades." })
+ns.Main.AddOption({ group = "Item tooltips", key = "tipSuffix", kind = "check", label = "Best random suffix", default = true,
+	tip = "For an item with random stats: the suffix to look for, such as \"of the Bear\"." })
+ns.Main.AddOption({ group = "Item tooltips", key = "tipOtherSpecs", kind = "check", label = "Ranks for other specs", default = true, tip = "Only specs where the item is an upgrade." })
+ns.Main.AddOption({ group = "Item tooltips", key = "tipStats", kind = "check", label = "Stat changes", default = true,
+	tip = "What changes against the item you wear." })
+ns.Main.AddOption({ group = "Item tooltips", key = "tipHideDelta", kind = "check", label = "Hide the game's stat changes", default = true,
+	tip = "The \"If you replace this item\" lines of the compare tooltip. They stay when ours are not shown." })
 
-local REASON = { class = "class", armor = "armor type", weapon = "weapon type", faction = "faction" }
+local REASON = { class = "other class", armor = "armor type", weapon = "weapon type", faction = "other faction" }
 local CACHE_MAX = 300
 
 local cache = {} -- key -> list of { left, right, small = true, blank = true }, or false for "no block"
@@ -80,45 +85,56 @@ local function SpecIcon(Gear, class, spec)
 	return "|T" .. icon .. ":14:14:0:0:64:64:5:59:5:59|t "
 end
 
--- "Rank #3 @ Level 26", and the gain on the right.
-local function RankLine(Gear, ctx, c, color, indent)
-	local text = (c.rank and ("Rank #" .. c.rank) or "Not ranked") .. " @ Level " .. tostring(ctx.level or "?")
+-- "Rank #3 @ Level 26", and the gain on the right. An item that waits for a level is ranked at
+-- that level: "Rank #3 @ Level 31", not "Not ranked @ Level 30" beside a green gain.
+-- name: said before the rank ("Tank set: Rank #3"), for a spec its icon does not tell apart.
+local function RankLine(Gear, ctx, c, color, indent, name)
+	local rank, level = c.rank, ctx.level
+	if c.atLevel then rank, level = c.rankAt, c.atLevel end
+	local text = (name and (name .. ": ") or "") .. (rank and ("Rank #" .. rank) or "Not ranked") .. " @ Level " .. tostring(level or "?")
 	local right = c.isWorn and (UI.Colored("Equipped", C.GREEN) .. Mark()) or Tip.Gain(c.gain)
 	return { (indent or "") .. SpecIcon(Gear, ctx.class, ctx.spec) .. UI.Colored(text, color), right }
 end
 
 -- Random suffix: the best one for this spec, then a line per stat, like the game's own stat lines.
--- Only for an item whose link has no suffix yet. An item with a suffix of its own gets nothing,
--- also when a better one exists: every suffix is ranked as an item of its own, so the rank line
--- already speaks for it.
-local function SuffixBlock(Gear, link)
-	local list = Gear.Suffixes and Gear.Suffixes(link)
+-- Only for an item whose link has no suffix yet: its rank and gain are for that suffix.
+local function SuffixBlock(Gear, link, ctx)
+	local list = Gear.Suffixes and Gear.Suffixes(link, ctx)
 	local best = type(list) == "table" and list[1]
 	if not best then return nil end
 	for i = 1, #list do
 		if list[i].current then return nil end
 	end
-	local block = { { Label("Suffix") .. UI.Colored(best.name, C.SUFFIX) } }
+	local block = { { Label("Best suffix") .. UI.Colored(best.name, C.SUFFIX) } }
 	for _, stat in ipairs(best.lines or {}) do block[#block + 1] = { stat } end
 	return block
 end
 
+-- An item that has its suffix, and not the best one: the one to look for, and where this one
+-- stands ("Best suffix: of the Bear, this one: 27 of 32"). Its rank line is for the suffix it has.
+local function BetterSuffix(Gear, link, ctx)
+	local list = Gear.Suffixes and Gear.Suffixes(link, ctx)
+	if type(list) ~= "table" or not list[1] then return nil end
+	for i = 2, #list do
+		if list[i].current then
+			return { { Label("Best suffix") .. UI.Colored(list[1].name, C.SUFFIX)
+				.. UI.Colored((", this one: %d of %d"):format(list[i].place or i, #list), C.MUTED) } }
+		end
+	end
+	return nil
+end
+
 local ATTR = { str = "Strength", agi = "Agility", sta = "Stamina", int = "Intellect", spi = "Spirit" }
 
-local function SignedText(v)
-	if math.abs(v) < 0.05 and math.abs(v) >= 0.005 then return ("%+.2f"):format(v) end -- too small for one decimal
-	-- one decimal, like the character sheet: the rates behind crit and dodge are not exact enough for two
-	if math.abs(v - Round(v)) < 0.05 then return ("%+d"):format(Round(v)) end
-	return ("%+.1f"):format(v)
-end
+local SignedText = UI.Signed
 
 local function StatValue(v, unit)
 	return UI.Colored(SignedText(v) .. (unit or ""), v > 0 and C.GREEN or v < 0 and C.RED or C.MUTED)
 end
 
 -- Stat changes against the worn item, gains first. The random suffix is counted.
-local function StatBlock(Gear, link)
-	local diff = Gear.StatDiff and Gear.StatDiff(link)
+local function StatBlock(Gear, link, ctx)
+	local diff = Gear.StatDiff and Gear.StatDiff(link, ctx)
 	if type(diff) ~= "table" then return nil end
 	local names = {}
 	for _, old in ipairs(diff.vs or {}) do
@@ -146,17 +162,36 @@ local function StatBlock(Gear, link)
 		block[#block + 1] = { stats[i] or " ", attrs[i] or " " }
 	end
 	if #block == 1 then block[2] = { UI.Colored("Same stats", C.MUTED) } end
+	-- An effect of the item that counts in its rank and is no stat: without it the lines above
+	-- can all be losses under a gain ("-30 Attack Power" on a weapon whose strike does the work).
+	local item = Gear.Item and Gear.Item(ns.ItemID(link))
+	for _, proc in ipairs(type(item) == "table" and item.procs or {}) do
+		local text
+		local rate = proc.ppm and ((proc.ppm % 1 == 0 and "%d" or "%.1f"):format(proc.ppm) .. " a minute") or nil
+		if proc.kind == "damage" and proc.amount then
+			text = proc.amount .. " damage on hit" .. (rate and (", " .. rate) or "")
+		elseif proc.kind == "health" and proc.amount then
+			text = proc.amount .. " health on hit" .. (rate and (", " .. rate) or "")
+		elseif proc.kind == "stat" and proc.amount and proc.stat then
+			text = "+" .. proc.amount .. " " .. (Gear.StatLabel and Gear.StatLabel(proc.stat) or proc.stat)
+				.. (proc.uptime and (", %d%% of the time"):format(proc.uptime * 100 + 0.5) or "")
+		elseif proc.kind == "points" then
+			text = "its special effect"
+		end
+		if text then block[#block + 1] = { UI.Colored("Counted too: " .. text, C.MUTED) } end
+	end
 	return block
 end
 
 -- The lines for one item, or false when it is not gear. short: rank line only.
+-- Always about the player's own gear: a Simulator preview does not count here.
 local function Build(link, short)
 	local Gear = ns.Gear
-	local c = Gear.Compare(link)
+	local ctx = Gear.PlayerContext() or {}
+	local c = Gear.Compare(link, ctx)
 	if type(c) ~= "table" then return false end
 	local id = ns.ItemID(link)
 	local db = ns.db
-	local ctx = Gear.Context() or {}
 	local tracked = id and Gear.IsTracked(id, Gear.LinkSuffixID and Gear.LinkSuffixID(link) or nil)
 
 	local reason = c.usable == false and (c.reason or "other") or nil
@@ -172,19 +207,23 @@ local function Build(link, short)
 	if c.score then head[1] = RankLine(Gear, ctx, c, C.GOLD) end
 	if reason == "level" then
 		local item = Gear.Item(id)
-		head[#head + 1] = { Label("Needs") .. UI.Colored(item and item.req and ("level " .. item.req) or "more levels", C.RED) }
+		local level = c.atLevel or (item and item.req)
+		head[#head + 1] = { Label("Needs") .. UI.Colored(level and ("level " .. level) or "more levels", C.RED) }
 	end
 	if short then return #head > 0 and head or false end
 	if db.tipOtherSpecs and ctx.class then
 		local others = {} -- best rank first; spec order breaks ties
 		for order, spec in ipairs(Gear.Specs(ctx.class) or {}) do
-			if spec.key ~= ctx.spec then
+			-- a custom spec whose list is not made yet is left out: making it here stalls the tooltip
+			if spec.key ~= ctx.spec and (not Gear.SpecReady or Gear.SpecReady(ctx.class, spec.key, link)) then
 				local other = {}
 				for k, v in pairs(ctx) do other[k] = v end
 				other.spec = spec.key
 				local oc = Gear.Compare(link, other)
-				if type(oc) == "table" and oc.rank then
-					local line = RankLine(Gear, other, oc, C.MUTED, "  ")
+				-- only a spec where the item is an upgrade
+				if type(oc) == "table" and oc.rank and oc.usable ~= false and type(oc.delta) == "number" and oc.delta > 0 then
+					-- custom specs share the question mark until an icon is picked: their name tells them apart
+					local line = RankLine(Gear, other, oc, C.MUTED, "  ", spec.custom and (spec.label or spec.key) or nil)
 					line.small = true
 					others[#others + 1] = { line = line, rank = oc.rank, order = order }
 				end
@@ -199,18 +238,39 @@ local function Build(link, short)
 	if #head > 0 then blocks[#blocks + 1] = head end
 
 	local worn = c.isWorn
-	if db.tipEnchant and c.slot and (worn or c.usable ~= false) then
-		local enchant = Gear.BestEnchant(c.slot)
+	-- the enchant for the slot, where it can matter: on what is worn and on an upgrade
+	if db.tipEnchant and c.slot and (worn or (c.usable ~= false and type(c.delta) == "number" and c.delta > 0)) then
+		local enchant = Gear.BestEnchant(c.slot, ctx)
 		local text = enchant and (enchant.text or enchant.name)
-		if text then blocks[#blocks + 1] = { { Label("Recommended enchant") .. text } } end
+		if text then
+			-- a worn item that has it already says so and needs no "how"
+			local has = worn and type(link) == "string" and tonumber(link:match("item:%d+:(%d+)")) == enchant.id
+			local block = { { Label("Recommended enchant") .. text .. (has and UI.Colored(" (on it)", C.GREEN) or "") } }
+			if not has then
+				-- what it is called and who makes it: "Enchant Bracer - Minor Stamina, Enchanting 80"
+				local how = {}
+				if enchant.name and enchant.name ~= text then how[1] = enchant.name end
+				if enchant.prof then how[#how + 1] = enchant.prof .. (enchant.skill and (" " .. enchant.skill) or "") end
+				if #how > 0 then block[2] = { UI.Colored("  " .. table.concat(how, ", "), C.MUTED), small = true } end
+			end
+			blocks[#blocks + 1] = block
+		end
 	end
-	local suffix = db.tipSuffix and SuffixBlock(Gear, link) or nil
+	local suffix = db.tipSuffix and SuffixBlock(Gear, link, ctx) or nil
 	if suffix then blocks[#blocks + 1] = suffix end
-	if db.tipStats and not worn then blocks[#blocks + 1] = StatBlock(Gear, link) end
+	local looked = db.tipSuffix and not suffix and not worn and BetterSuffix(Gear, link, ctx) or nil
+	if looked then blocks[#blocks + 1] = looked end
+	local stats = db.tipStats and not worn and StatBlock(Gear, link, ctx) or nil
+	if stats then blocks[#blocks + 1] = stats end
 	local last = {}
 	if db.tipSource and id then
 		local source = Gear.SourceText(id)
-		if source then last[#last + 1] = { Label("Source") .. source } end
+		if source then
+			last[#last + 1] = { Label("Source") .. source }
+		elseif Gear.Item and Gear.Item(id) then
+			-- an item of the lists with no source in the data: said, so it does not read as a setting that is off
+			last[#last + 1] = { Label("Source") .. UI.Colored("unknown", C.FAINT) }
+		end
 		-- a vendor whose price or requirements we have not confirmed: say so in small print
 		if source and Gear.SourceUnsure and Gear.SourceUnsure(id) then
 			last[#last + 1] = { UI.Colored(Gear.UNSURE_NOTE or "Vendor details are not confirmed yet.", C.FAINT), small = true }
@@ -221,7 +281,8 @@ local function Build(link, short)
 
 	-- blocks, with an empty line between them
 	-- lines.suffix: the suffix block by itself; its lines here are marked, so they can be left out
-	local lines = { suffix = suffix }
+	-- lines.stats: our "Compared to" block is among them
+	local lines = { suffix = suffix, stats = stats ~= nil }
 	for i, block in ipairs(blocks) do
 		if i > 1 then lines[#lines + 1] = { blank = true, suffix = block == suffix or nil } end
 		for _, line in ipairs(block) do
@@ -340,14 +401,52 @@ function Tip.BeforeLine(tooltip, line)
 	if not ok then ns.Debug("tooltip line", err) end
 end
 
+-- A recipe: the gear it teaches to make, and what that is worth to the player.
+-- "Makes: Golden Scale Coif | +12". false when the item teaches no gear of the data.
+local function RecipeLines(link)
+	local key = link .. "?"
+	local lines = cache[key]
+	if lines ~= nil then return lines end
+	lines = false
+	local Gear = ns.Gear
+	local products = Gear.RecipeProducts and Gear.RecipeProducts(ns.ItemID(link))
+	local ctx = Gear.PlayerContext() or {}
+	for i = 1, math.min(#(products or {}), 3) do
+		local id = products[i]
+		local item = Gear.Item(id)
+		local c = item and Gear.Compare(Gear.WantedLink and Gear.WantedLink(id, ctx) or ("item:" .. id), ctx)
+		if type(c) == "table" then
+			local worth
+			if c.isWorn then
+				worth = UI.Colored("Equipped", C.GREEN)
+			elseif c.usable == false then
+				worth = c.reason == "level" and c.atLevel and UI.Colored("Level " .. c.atLevel, C.MUTED) or UI.Colored("Can't use", C.RED)
+			elseif type(c.delta) == "number" then
+				worth = c.delta > 0 and Tip.Gain(c.gain) or UI.Colored("No upgrade", C.FAINT)
+			end
+			lines = lines or {}
+			lines[#lines + 1] = { Label("Makes") .. UI.Colored(item.name or "?", UI.QUALITY[item.quality or 1] or C.TEXT), worth }
+		end
+	end
+	if cached >= CACHE_MAX then Tip.Clear() end
+	cache[key] = lines
+	cached = cached + 1
+	return lines
+end
+
 local function Fill(tooltip, data)
 	local kind = tooltip and Kind(tooltip)
 	if not kind or done[tooltip] then return end
 	local db, Gear = ns.db, ns.Gear
 	if not db or not db.tipOn or not Gear or not Gear.Compare then return end
 	local link = LinkOf(tooltip, data)
-	if not link or NotGear(link) then return end
-	local lines = Tip.Lines(link, kind == "short")
+	if not link then return end
+	local lines
+	if NotGear(link) then
+		lines = kind == "full" and RecipeLines(link) or nil
+	else
+		lines = Tip.Lines(link, kind == "short")
+	end
 	if not lines then return end
 	-- without the clear hook the flag would never go away
 	if Hook(tooltip) then done[tooltip] = true end
@@ -455,12 +554,24 @@ end
 
 -- Fills a compare tooltip again without the block. True when it did.
 local busy = false
+-- Does the tooltip of the item being looked at carry our own "Compared to" block? Only then is
+-- the game's block a repeat. Without ours (an item not in the data, one the class cannot use,
+-- "Stat changes" or "Item score" off) the game's block is the only comparison the player has.
+local function OursShown(owner)
+	if not ns.db.tipOn then return false end
+	local link = LinkOf(owner)
+	if not link then return false end
+	local ok, lines = pcall(Tip.Lines, link)
+	return ok and type(lines) == "table" and lines.stats == true
+end
+
 local function Rebuild(tooltip)
-	if busy or not ns.db or not ns.db.tipHideDelta then return false end
+	if busy or Tip.deltaBroken or not ns.db or not ns.db.tipHideDelta then return false end
 	local manager = TooltipComparisonManager
 	local owner = type(manager) == "table" and manager.tooltip
 	local pair = owner and owner.shoppingTooltips
 	if not pair or (tooltip ~= pair[1] and tooltip ~= pair[2]) then return false end
+	if not OursShown(owner) then return false end
 	local head, hint = Tip.FindDelta(tooltip)
 	if not head then return false end
 	local item
@@ -471,6 +582,15 @@ local function Rebuild(tooltip)
 	tooltip:ClearLines()
 	if tooltip.CompareHeader then tooltip.CompareHeader:Show() end -- clearing hides the "Equipped" tab
 	tooltip:ProcessInfo({ tooltipData = data, append = true })
+	-- The game fills the tooltip in a protected call: an error in there does not reach this code,
+	-- and the tooltip stays empty. Then the clean-up is off until the next reload. The game fills
+	-- its compare tooltips again five times a second, so the empty one is gone at once.
+	if tooltip.NumLines and tooltip:NumLines() == 0 then
+		busy = false
+		Tip.deltaBroken = true
+		ns.Debug("compare tooltip", "the refill left it empty: clean-up off")
+		return false
+	end
 	if hint and hint[1] then
 		tooltip:AddLine(" ")
 		tooltip:AddLine(hint[1], hint[2], hint[3], hint[4], true)
@@ -519,8 +639,9 @@ end)
 
 ns.Command("tip", "Tooltip: are the hooks there", function()
 	ns.Print("Tooltip line hook: " .. (Tip.lineHook and "on" or "off"))
-	ns.Print("Compare tooltip hook: " .. (Tip.deltaHook and "on" or "off") .. ", cleaned: " .. tostring(Tip.deltaRebuilds or 0))
-end)
+	ns.Print("Compare tooltip hook: " .. (Tip.deltaHook and "on" or "off") .. ", cleaned: " .. tostring(Tip.deltaRebuilds or 0)
+		.. (Tip.deltaBroken and ", stopped: a refill failed" or ""))
+end, true)
 
 for _, message in ipairs({ "CONTEXT_CHANGED", "GEAR_CHANGED", "FILTERS_CHANGED", "HUNTS_CHANGED", "SETTINGS_CHANGED" }) do
 	ns.Listen(message, Tip.Clear)

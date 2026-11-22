@@ -53,9 +53,12 @@ local function Fill()
 	view.faction:SetValue(sim.faction)
 	view.level:SetValue(sim.level)
 	local ctx = SimContext()
-	view.over:Fill(function(slot) return List("List", slot, ctx, { count = 1 })[1] end)
+	-- the filters of the Upgrades tab are the player's own and have no bar here: left out
+	view.over:Fill(function(slot) return List("List", slot, ctx, { count = 1, plain = true })[1] end, true)
 	local active = Call("Context")
 	view.back:SetEnabled(type(active) == "table" and active.preview and true or false)
+	-- the player's own class at another level or spec: the gains are against what is worn now
+	view.note:SetShown(ns.player ~= nil and sim.class == ns.player.class)
 end
 
 local function Apply()
@@ -120,7 +123,11 @@ local function Build(panel)
 		Fill()
 	end)
 
-	local top = -42
+	view.note = UI.Text(panel, "GameFontHighlightSmall", C.FAINT, 11)
+	view.note:SetPoint("TOPLEFT", 2, -30)
+	view.note:SetText("Gains: against what you wear now. Click a slot for its list.")
+
+	local top = -44
 	local box = UI.Box(panel)
 	box:SetPoint("TOPLEFT", 0, top)
 	box:SetPoint("BOTTOMRIGHT", 0, 0)

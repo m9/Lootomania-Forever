@@ -71,6 +71,27 @@ function UI.Text(parent, font, c, size)
 	return fs
 end
 
+-- Fits a font string (its text already set) into a width: it wraps to as many lines as the text
+-- needs, up to max. Returns the number of lines; the caller sets the height.
+-- The count errs on the high side: a line too many is a small gap, a line too few cuts the text.
+-- The game is asked when it can say (GetNumLines); the width estimate allows for the space a
+-- wrap at a word leaves unused.
+function UI.Fit(fs, width, max)
+	fs:SetWidth(width)
+	local n = 1
+	if max and max > 1 then
+		local full = fs.GetUnboundedStringWidth and fs:GetUnboundedStringWidth() or fs:GetStringWidth() or 0
+		if full > width then
+			n = math.ceil(full / (width * 0.85))
+			fs:SetWordWrap(true)
+			local told = fs.GetNumLines and tonumber(ns.Plain(fs:GetNumLines())) or 0
+			n = math.max(2, math.min(max, math.max(n, told)))
+		end
+	end
+	fs:SetWordWrap(n > 1)
+	return n
+end
+
 -- Heading in the fantasy font.
 function UI.Heading(parent, size, c)
 	local fs = UI.Text(parent, "GameFontNormalLarge", c or C.GOLD)
@@ -566,10 +587,62 @@ end
 
 -- Windows -----------------------------------------------------------------------------
 
+-- Escape. The game hides every shown frame of UISpecialFrames on one Escape, in the same step
+-- as its own panels (the world map). So only one of our windows is in that list at a time:
+-- the one shown last. While the world map is up none is, so Escape closes the map and our
+-- window stays; the next Escape closes the window.
+local escapeNames = {} -- frame name -> true: ours
+local escapeOrder = {} -- the shown ones, oldest first
+local mapHooked
+
+local SyncEscapeLater
+
+local function SyncEscape()
+	for i = #UISpecialFrames, 1, -1 do
+		if escapeNames[UISpecialFrames[i]] then table.remove(UISpecialFrames, i) end
+	end
+	local map = _G.WorldMapFrame
+	if map and not mapHooked and map.HookScript then
+		mapHooked = true
+		map:HookScript("OnShow", SyncEscape)
+		map:HookScript("OnHide", SyncEscapeLater)
+	end
+	local top = escapeOrder[#escapeOrder]
+	if top and not (map and map:IsShown()) then table.insert(UISpecialFrames, top:GetName()) end
+end
+
+-- After a hide: the game is still walking its list, and hides the map and the listed frames in
+-- one go. The next window is listed a moment later, so it takes an Escape of its own.
+function SyncEscapeLater()
+	C_Timer.After(0, SyncEscape)
+end
+
+local function Unlist(f)
+	for i = #escapeOrder, 1, -1 do
+		if escapeOrder[i] == f then table.remove(escapeOrder, i) end
+	end
+end
+
+local function CloseOnEscape(f)
+	escapeNames[f:GetName()] = true
+	f:HookScript("OnShow", function(self)
+		Unlist(self)
+		escapeOrder[#escapeOrder + 1] = self
+		SyncEscape()
+	end)
+	f:HookScript("OnHide", function(self)
+		Unlist(self)
+		SyncEscapeLater()
+	end)
+end
+-- For a frame that is not a UI.Window (the side panel). The frame needs a global name.
+UI.CloseOnEscape = CloseOnEscape
+
 -- A movable black window with a gold title and a close button. Its place is saved under
 -- `name`. Returns the frame; put things on frame.body.
--- opts: { escape = true (close on Escape), strata = "MEDIUM", noClose = false,
---         scaleKey = a setting in percent: the window follows it }
+-- opts: { escape = true (close on Escape: the window shown last closes first), strata = "MEDIUM",
+--         noClose = false, scaleKey = a setting in percent: the window follows it }
+-- The window has OnShow and OnHide scripts of its own: add to them with HookScript, not SetScript.
 function UI.Window(name, title, width, height, opts)
 	opts = opts or {}
 	local f = CreateFrame("Frame", "Lootomania" .. name, UIParent, "BackdropTemplate")
@@ -582,11 +655,16 @@ function UI.Window(name, title, width, height, opts)
 	f:SetMovable(true)
 	f:RegisterForDrag("LeftButton")
 
+	-- The place is saved in the window's own scale units, with that scale beside it: a window
+	-- built after its scale setting changed (the roll window is built at the first roll) lands
+	-- where it was on screen, not at the old numbers under the new scale.
 	local function place()
 		local saved = ns.db and ns.db.windows[name]
 		f:ClearAllPoints()
 		if saved and saved.x then
-			f:SetPoint(saved.point or "CENTER", UIParent, saved.rel or saved.point or "CENTER", saved.x, saved.y)
+			local now = f:GetScale()
+			local k = (saved.scale and now and now > 0) and saved.scale / now or 1
+			f:SetPoint(saved.point or "CENTER", UIParent, saved.rel or saved.point or "CENTER", saved.x * k, saved.y * k)
 		else
 			f:SetPoint("CENTER", UIParent, "CENTER", opts.x or 0, opts.y or 0)
 		end
@@ -597,7 +675,7 @@ function UI.Window(name, title, width, height, opts)
 	local function save()
 		local left, top = f:GetLeft(), f:GetTop()
 		if left and top then
-			ns.db.windows[name] = { point = "TOPLEFT", rel = "BOTTOMLEFT", x = left, y = top }
+			ns.db.windows[name] = { point = "TOPLEFT", rel = "BOTTOMLEFT", x = left, y = top, scale = f:GetScale() }
 		end
 	end
 	f:SetScript("OnDragStop", function(self)
@@ -641,8 +719,8 @@ function UI.Window(name, title, width, height, opts)
 	f.body:SetPoint("TOPLEFT", 12, -46)
 	f.body:SetPoint("BOTTOMRIGHT", -12, 12)
 
-	if opts.escape ~= false then table.insert(UISpecialFrames, f:GetName()) end
 	f:Hide()
+	if opts.escape ~= false then CloseOnEscape(f) end
 	ns.OnLoad(place)
 	return f
 end
@@ -687,4 +765,13 @@ function UI.Money(copper)
 	if s > 0 then out[#out + 1] = UI.Colored(s .. "s", { 0.78, 0.78, 0.80 }) end
 	if c > 0 or #out == 0 then out[#out + 1] = UI.Colored(c .. "c", { 0.80, 0.52, 0.30 }) end
 	return table.concat(out, " ")
+end
+
+-- A signed number for a stat change: "+12", "-0.4", "+0.02".
+function UI.Signed(v)
+	if math.abs(v) < 0.05 and math.abs(v) >= 0.005 then return ("%+.2f"):format(v) end -- too small for one decimal
+	-- one decimal, like the character sheet: the rates behind crit and dodge are not exact enough for two
+	local whole = math.floor(v + 0.5)
+	if math.abs(v - whole) < 0.05 then return ("%+d"):format(whole) end
+	return ("%+.1f"):format(v)
 end

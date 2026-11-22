@@ -1,5 +1,21 @@
 # Changelog
 
+## 16001-0.1.9
+
+- Sources a player can use: no closed raids, no other faction's or class's items. Dead-end sources fixed. Items QuestieDB has no source for get one from AllTheThings.
+- Crafts say what they need. Recipes show where they come from.
+- The character counts: skills, standings, done quests, rank and gold decide "can I get it now".
+- Side panel: a click shows a creature's model, level, place and gear.
+- One list of tracked items per character. Tracker, guide and pins lead to a source with a place on the map.
+- Tooltips say what comes next: the better item, quest rewards, recipes. Creature gear shows without Shift.
+- The Simulator looks ahead for the player.
+- Escape closes one thing at a time.
+- Icon list with every game icon by name, with a search.
+- Data rebuilt with QuestieDB 1.1.4.
+- "Ranks for other specs" in tooltips show only specs where the item is an upgrade.
+- Removed: the filter rules "No dungeons", "Dungeons only" and "Buy only", the "Where to start" view, the Help button, "Spot: x, y" in pin tooltips, `/lm minimap`, the "Post summary to group" setting.
+- Many fixes from a code review.
+
 ## 16001-0.1.8
 
 - Filters moved into a "Filters" window with checkboxes for sources, vendor types and rules. The Upgrades tab keeps the zone box, a Filters button with a count, and Reset, at the top right.

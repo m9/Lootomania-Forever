@@ -145,8 +145,30 @@ local function Procs(text)
 	return #procs > 0 and procs or nil
 end
 
+-- Items by their name, whatever the case: a list of ids (several items can share a name), or nil.
+local byName
+function Gear.FindItems(name)
+	if type(name) ~= "string" then return nil end
+	if not byName then
+		byName = {}
+		local _, index = itemLine(0)
+		for id, line in pairs(index) do
+			local known = line:match("^([^%^]+)")
+			if known then
+				known = known:lower()
+				byName[known] = byName[known] or {}
+				table.insert(byName[known], id)
+			end
+		end
+		for _, list in pairs(byName) do table.sort(list) end
+	end
+	return byName[name:lower():match("^%s*(.-)%s*$")]
+end
+
 -- Line: name^quality^ilvl^req^slot^hand^armor^bind^flags^classMask^stats^weapon^suffixSet^procs^wtype
--- flags: 1 unique, 2 Alliance only, 4 Horde only, 8 relic
+-- flags: 1 unique, 2 Alliance only, 4 Horde only, 8 relic, 16 reach
+-- reach: the item's own row asks for no level, and req is the level it can be had at (its quest's
+-- level, else an estimate). It decides when the item enters the lists; it is not a requirement.
 function Gear.Item(id)
 	local item = items[id]
 	if item ~= nil then return item or nil end
@@ -170,6 +192,7 @@ function Gear.Item(id)
 		unique = bit.band(flags, 1) ~= 0 or nil,
 		side = (bit.band(flags, 2) ~= 0 and "A") or (bit.band(flags, 4) ~= 0 and "H") or nil,
 		relic = bit.band(flags, 8) ~= 0 or nil,
+		reach = bit.band(flags, 16) ~= 0 or nil,
 		classMask = num(f[10]),
 		stats = Stats(f[11]),
 		procs = Procs(f[14]),
@@ -230,6 +253,38 @@ function Gear.StatLabel(key)
 	return STAT_LABEL[key] or (Data.statLabels and Data.statLabels[key]) or key
 end
 
+-- The weights a spec can have, in the order of the stat keys. The scorer reads some stats under
+-- one weight (every weapon skill and expertise under "weaponSkill", every resistance under
+-- "resist"), and "healAsSp" is a weight with no stat of its own.
+local WEIGHT_LABEL = { weaponSkill = "Weapon skill", resist = "Resistance", healAsSp = "Healing as spell power" }
+local weightKeys
+function Gear.WeightKeys()
+	if weightKeys then return weightKeys end
+	local seen, map = {}, Data.weightKey or {}
+	weightKeys = {}
+	for _, stat in ipairs(Gear.StatKeys()) do
+		local key = map[stat] or stat
+		if not seen[key] then
+			seen[key] = true
+			weightKeys[#weightKeys + 1] = key
+		end
+	end
+	if not seen.healAsSp then weightKeys[#weightKeys + 1] = "healAsSp" end
+	return weightKeys
+end
+
+function Gear.WeightLabel(key)
+	return WEIGHT_LABEL[key] or Gear.StatLabel(key)
+end
+
+-- "+4 Agility", "+1% Hit chance", "+0.4% Dodge chance": a label that ends in " %" gives its sign
+-- to the number, as the game writes it.
+function Gear.StatText(key, value)
+	local label, unit = Gear.StatLabel(key), ""
+	if label:sub(-2) == " %" then label, unit = label:sub(1, -3), "%" end
+	return (value == math.floor(value) and "%+d%s %s" or "%+.1f%s %s"):format(value, unit, label)
+end
+
 -- Classes and specs -----------------------------------------------------------------------
 
 local CLASS_LABEL = {
@@ -249,8 +304,10 @@ local function Pretty(key)
 	return (key:gsub("_", " "):gsub("^%l", string.upper))
 end
 
--- Icon per spec. Custom specs and unknown ones get the class's first icon.
+-- Icon per spec. A custom spec has the icon picked in the spec editor (a path or a file id), the
+-- question mark without one. An unknown spec gets the class's first icon.
 local ICONS = "Interface\\Icons\\"
+Gear.NO_ICON = ICONS .. "INV_Misc_QuestionMark"
 local SPEC_ICON = {
 	WARRIOR = { arms = "Ability_Warrior_SavageBlow", fury = "Ability_Warrior_InnerRage", protection = "Ability_Warrior_DefensiveStance" },
 	PALADIN = { holy = "Spell_Holy_HolyBolt", protection = "Spell_Holy_DevotionAura", retribution = "Spell_Holy_AuraOfLight",
@@ -268,6 +325,8 @@ local SPEC_ICON = {
 }
 
 function Gear.SpecIcon(class, spec)
+	local custom = ns.db and ns.db.customSpecs and ns.db.customSpecs[class] and ns.db.customSpecs[class][spec]
+	if custom then return custom.icon or Gear.NO_ICON end
 	local icons = SPEC_ICON[class]
 	local name = icons and icons[spec]
 	if not name and icons then
@@ -275,7 +334,7 @@ function Gear.SpecIcon(class, spec)
 		local first = order and order[1]
 		name = first and icons[first]
 	end
-	return ICONS .. (name or "INV_Misc_QuestionMark")
+	return name and (ICONS .. name) or Gear.NO_ICON
 end
 
 -- The record of one spec in the weights data.
@@ -307,8 +366,10 @@ end
 local function TraitPoints()
 	if not C_Traits or not C_Traits.GetGroupDisplayInfoByTreeID or not C_Traits.GetGroupCurrencyInfo or not C_Traits.GetConfigInfo then return nil end
 	local config
-	if C_SpecializationInfo and C_SpecializationInfo.GetCombatConfigIDForSpecGroup and C_SpecializationInfo.GetActiveSpecGroup then
-		config = C_SpecializationInfo.GetCombatConfigIDForSpecGroup(C_SpecializationInfo.GetActiveSpecGroup())
+	-- the active talent group: the C_ form, or the old global where only that is there
+	local group = (C_SpecializationInfo and C_SpecializationInfo.GetActiveSpecGroup) or GetActiveSpecGroup
+	if C_SpecializationInfo and C_SpecializationInfo.GetCombatConfigIDForSpecGroup and group then
+		config = C_SpecializationInfo.GetCombatConfigIDForSpecGroup(group())
 	end
 	if not config and C_ClassTalents and C_ClassTalents.GetActiveConfigID then config = C_ClassTalents.GetActiveConfigID() end
 	if type(config) ~= "number" then return nil end
@@ -363,6 +424,9 @@ end
 -- Context ----------------------------------------------------------------------------------
 
 local preview
+-- The spec the talents say, for a character that picked none: read once, and again after
+-- anything that empties the caches (the talent events do). nil: not read; false: no tree has points.
+local talentSpec
 
 function Gear.PlayerContext()
 	local player = ns.player
@@ -370,7 +434,8 @@ function Gear.PlayerContext()
 	local class = player.class
 	local spec = ns.char.spec
 	if not spec or not SpecRecord(class, spec) then
-		spec = TalentSpec(class) or (Data.specOrder and Data.specOrder[class] and Data.specOrder[class][1])
+		if talentSpec == nil then talentSpec = TalentSpec(class) or false end
+		spec = talentSpec or (Data.specOrder and Data.specOrder[class] and Data.specOrder[class][1])
 	end
 	return { class = class, spec = spec, faction = player.faction, level = UnitLevel("player") or 1 }
 end
@@ -380,6 +445,8 @@ function Gear.Context()
 end
 
 local function Ctx(ctx)
+	-- a whole context needs nothing from the active one
+	if ctx and ctx.class and ctx.spec and ctx.faction and ctx.level then return ctx end
 	local base = Gear.Context()
 	if not ctx then return base end
 	if not base then return ctx end
@@ -400,6 +467,7 @@ local function Cache()
 	return cache
 end
 local function Wipe()
+	talentSpec = nil
 	for _, cache in ipairs(caches) do
 		for k in pairs(cache) do cache[k] = nil end
 	end
@@ -422,29 +490,40 @@ function Gear.SetPreview(ctx)
 	ContextChanged()
 end
 
+-- spec nil: back to the spec the talents say.
 function Gear.SetSpec(spec)
 	ns.char.spec = spec
 	ContextChanged()
+end
+
+-- True when the player picked a spec by hand; false when it follows the talents.
+function Gear.SpecPicked()
+	local spec = ns.char and ns.char.spec
+	return spec ~= nil and ns.player ~= nil and SpecRecord(ns.player.class, spec) ~= nil
 end
 
 -- Usability ---------------------------------------------------------------------------------
 
 -- Data.classes[class] = { armor = { Cloth = true }, armorAt = { Mail = 40 }, weapons = { Sword = true },
 -- shield = bool, dual = bool }. Mail and plate come at level 40.
-function Gear.Usable(id, ctx)
-	ctx = Ctx(ctx)
-	local item = type(id) == "table" and id or Gear.Item(id)
-	if not item or not ctx then return true end
+-- Returns usable, and when not: the reason, and for "level" the level it can be used from. An
+-- item that only waits for a level (its own, or the level the class learns its armor at) is not
+-- "can't use": it is "at level 40". An item that asks for no level (reach) waits for none: who
+-- has it wears it, whatever the level its quest is given at.
+-- UsableFor: the same for an item and a context taken as they are (a context with no faction
+-- asks for none).
+local function UsableFor(item, ctx)
 	local rules = Data.classes and Data.classes[ctx.class]
 	if item.classMask and Data.classBit and Data.classBit[ctx.class] then
 		if bit.band(item.classMask, Data.classBit[ctx.class]) == 0 then return false, "class" end
 	end
 	if item.side and ctx.faction and item.side ~= ctx.faction:sub(1, 1) then return false, "faction" end
+	local at -- the level it waits for
 	if rules then
 		if item.armor and item.slot ~= "Back" then
 			if not rules.armor[item.armor] then return false, "armor" end
-			local at = rules.armorAt and rules.armorAt[item.armor]
-			if at and ctx.level < at then return false, "armor" end
+			local learned = rules.armorAt and rules.armorAt[item.armor]
+			if learned and ctx.level < learned then at = learned end
 		end
 		if item.hand == "shield" and not rules.shield then return false, "armor" end
 		if item.hand == "relic" and item.wtype and not rules.weapons[item.wtype] then return false, "class" end
@@ -454,8 +533,16 @@ function Gear.Usable(id, ctx)
 		end
 		if item.hand == "off" and item.wtype and not rules.dual then return false, "weapon" end
 	end
-	if item.req and item.req > ctx.level then return false, "level" end
+	if item.req and item.req > ctx.level and not item.reach then at = math.max(at or 0, item.req) end
+	if at then return false, "level", at end
 	return true
+end
+
+function Gear.Usable(id, ctx)
+	ctx = Ctx(ctx)
+	local item = type(id) == "table" and id or Gear.Item(id)
+	if not item or not ctx then return true end
+	return UsableFor(item, ctx)
 end
 
 local REASON = { class = "Wrong class", armor = "Can't wear", weapon = "Can't wield", faction = "Other faction", level = "Level too low" }
@@ -510,12 +597,12 @@ end
 -- "+4 Agility, +4 Strength": biggest first. Second result: the parts as a list.
 local function StatsText(stats)
 	local parts = {}
-	for key, value in pairs(stats or {}) do parts[#parts + 1] = { label = Gear.StatLabel(key), value = value } end
+	for key, value in pairs(stats or {}) do parts[#parts + 1] = { key = key, label = Gear.StatLabel(key), value = value } end
 	table.sort(parts, function(a, b)
 		if a.value ~= b.value then return a.value > b.value end
 		return a.label < b.label
 	end)
-	for i, part in ipairs(parts) do parts[i] = ("%+d %s"):format(part.value, part.label) end
+	for i, part in ipairs(parts) do parts[i] = Gear.StatText(part.key, part.value) end
 	return table.concat(parts, ", "), parts
 end
 
@@ -570,27 +657,54 @@ function Gear.Worn(slotKey)
 	return worn
 end
 
--- Score to beat in a slot: the weaker worn item, 0 when a slot is empty.
--- A preview context compares with nothing.
-local function WornScore(slotKey, ctx, hand)
-	if ctx.preview then return nil end
+-- Hand of a worn item: from our data, else from the game ("two" for a two-hander).
+local function WornHand(w)
+	local item = w.id and Gear.Item(w.id)
+	if item then return item.hand end
+	local _, _, _, equipLoc = C_Item.GetItemInfoInstant(w.link)
+	return equipLoc == "INVTYPE_2HWEAPON" and "two" or nil
+end
+
+-- The worn items a new item of this slot and hand takes off: both hands for a two-hander, the
+-- worn two-hander for an off-hand item, else the weaker worn item of a full slot. Empty: a free slot.
+local function Replaced(slotKey, hand, ctx)
+	local out = {}
 	local slot = SLOT[slotKey]
-	if not slot then return nil end
-	local worn = Gear.Worn(slotKey)
-	-- a two-hander replaces both hands; a one-hander replaces a worn two-hander
+	if not slot then return out end
 	if slotKey == "MainHand" and hand == "two" then
-		local total = 0
-		for _, w in ipairs(worn) do total = total + (Gear.Score(w.link, ctx) or 0) end
-		for _, w in ipairs(Gear.Worn("OffHand")) do total = total + (Gear.Score(w.link, ctx) or 0) end
-		return total
+		for _, w in ipairs(Gear.Worn("MainHand")) do out[#out + 1] = w end
+		for _, w in ipairs(Gear.Worn("OffHand")) do out[#out + 1] = w end
+		return out
 	end
-	if #worn < #slot.inv then return 0 end
-	local low
+	local worn = Gear.Worn(slotKey)
+	if slotKey == "OffHand" and #worn == 0 then
+		local main = Gear.Worn("MainHand")[1]
+		if main and WornHand(main) == "two" then out[1] = main end
+		return out
+	end
+	if #worn < #slot.inv then return out end
+	local low, lowScore
 	for _, w in ipairs(worn) do
 		local score = Gear.Score(w.link, ctx) or 0
-		if not low or score < low then low = score end
+		if not low or score < lowScore then low, lowScore = w, score end
 	end
-	return low or 0
+	out[1] = low
+	return out
+end
+
+-- A preview of the player's own class (another level or spec: "what next for me?") is still about
+-- the player's gear. A preview of another class is about another character.
+local function OwnGear(ctx)
+	return not ctx.preview or (ns.player ~= nil and ctx.class == ns.player.class)
+end
+
+-- Score to beat in a slot: what the item takes off (see Replaced), 0 for a free slot.
+-- A preview of another class compares with nothing.
+local function WornScore(slotKey, ctx, hand)
+	if not OwnGear(ctx) or not SLOT[slotKey] then return nil end
+	local total = 0
+	for _, w in ipairs(Replaced(slotKey, hand, ctx)) do total = total + (Gear.Score(w.link, ctx) or 0) end
+	return total
 end
 
 -- Random suffix id of a link, nil when it has none we know.
@@ -610,6 +724,13 @@ local function IsWorn(slotKey, id, suffixId)
 	return false
 end
 
+-- A one-hander may go in either hand: worn in the other hand counts as worn here too.
+local OTHER_HAND = { MainHand = "OffHand", OffHand = "MainHand" }
+local function IsWornInHands(slotKey, id, suffixId, hand)
+	if IsWorn(slotKey, id, suffixId) then return true end
+	return hand == "one" and OTHER_HAND[slotKey] ~= nil and IsWorn(OTHER_HAND[slotKey], id, suffixId)
+end
+
 -- Hunts ----------------------------------------------------------------------------------------
 
 -- An item is tracked once, with the suffix that was picked (none: any suffix).
@@ -621,10 +742,13 @@ function Gear.IsTracked(id, suffixId)
 	return suffixId == nil or wanted == nil or wanted == suffixId
 end
 
+-- Tracking an item makes it wanted again: its done or removed mark goes.
 function Gear.Track(id, on, suffixId)
 	if on == nil then on = true end
-	ns.char.hunts.tracked[id] = on and true or nil
-	ns.char.hunts.suffix[id] = on and suffixId or nil
+	local hunts = ns.char.hunts
+	hunts.tracked[id] = on and true or nil
+	hunts.suffix[id] = on and suffixId or nil
+	if on then hunts.state[suffixId and (id .. ":" .. suffixId) or id] = nil end
 	ns.Send("HUNTS_CHANGED")
 end
 
@@ -651,6 +775,12 @@ function Gear.Name(id, ctx)
 	return item.name, item.quality
 end
 
+-- Link of an item with the suffix to look for, for tooltips and comparisons.
+function Gear.WantedLink(id, ctx)
+	local suffix = Gear.WantedSuffix(id, ctx)
+	return Gear.Link(id, suffix and suffix.id)
+end
+
 function Gear.Tracked()
 	local out = {}
 	for id in pairs(ns.char.hunts.tracked) do out[#out + 1] = id end
@@ -670,6 +800,24 @@ function Gear.SetState(id, state, suffixId)
 		ns.char.hunts.suffix[id] = nil
 	end
 	ns.Send("HUNTS_CHANGED")
+end
+
+-- Everything marked done or removed: { { id, suffix, state } }, by item id.
+function Gear.States()
+	local out = {}
+	for key, state in pairs(ns.char and ns.char.hunts.state or {}) do
+		local id, suffix = key, nil
+		if type(key) == "string" then
+			id, suffix = key:match("^(%d+):(%-?%d+)$")
+			id, suffix = tonumber(id), tonumber(suffix)
+		end
+		if id then out[#out + 1] = { id = id, suffix = suffix, state = state } end
+	end
+	table.sort(out, function(a, b)
+		if a.id ~= b.id then return a.id < b.id end
+		return (a.suffix or 0) < (b.suffix or 0)
+	end)
+	return out
 end
 
 -- Lists ------------------------------------------------------------------------------------------
@@ -718,7 +866,9 @@ local function Pool(class, spec, slotKey)
 		for _, id in ipairs(SlotItems(slotKey)) do
 			local item = Gear.Item(id)
 			local fits = item and (slotKey ~= "OffHand" or item.slot == "OffHand" or (rules and rules.dual))
-			local usable = fits and Gear.Usable(item, ctx) -- level 60: only class, armor and weapon rules can fail
+			-- level 60 and no faction: only class, armor and weapon rules can fail. The pool is for
+			-- both factions (the list filters by faction), so the active one must not be filled in.
+			local usable = fits and UsableFor(item, ctx)
 			if usable then
 				if item.suffixes and #item.suffixes > 0 then
 					local list = Gear.Suffixes(id, ctx)
@@ -740,6 +890,65 @@ local function Pool(class, spec, slotKey)
 	pools[key] = pool
 	return pool
 end
+
+-- A custom spec has no generated list: its pool for a slot is made by scoring every item of the
+-- slot, tens of milliseconds each. That is not done inside a tooltip: the lines about the other
+-- specs leave a custom spec out until its pools are made (SpecReady), and Warm makes them, a
+-- slot per timer tick, after login and after a spec is saved.
+function Gear.SpecReady(class, spec, item)
+	local rec = SpecRecord(class, spec)
+	if not (rec and rec.custom) then return true end
+	item = type(item) == "table" and item or Gear.Item(ns.ItemID(item))
+	if not item or not item.slot then return true end
+	local key = class .. "/" .. spec .. "/"
+	if pools[key .. item.slot] == nil then return false end
+	return not (item.slot == "MainHand" and item.hand == "one") or pools[key .. "OffHand"] ~= nil
+end
+
+-- The next pool of a custom spec that is not made: the player's class first.
+local function NextCold()
+	local all = ns.db and ns.db.customSpecs
+	if not all then return nil end
+	local function cold(class)
+		for key in pairs(all[class] or {}) do
+			if SpecRecord(class, key) then
+				for _, slot in ipairs(Gear.SLOTS) do
+					if pools[class .. "/" .. key .. "/" .. slot.key] == nil then return class, key, slot.key end
+				end
+			end
+		end
+	end
+	local mine = ns.player and ns.player.class
+	if mine then
+		local class, key, slot = cold(mine)
+		if class then return class, key, slot end
+	end
+	for class in pairs(all) do
+		if class ~= mine then
+			local found, key, slot = cold(class)
+			if found then return found, key, slot end
+		end
+	end
+	return nil
+end
+
+local warming = false
+local function Warm()
+	if warming or not C_Timer or not NextCold() then return end
+	warming = true
+	local function step()
+		local class, key, slot = NextCold()
+		if not class then
+			warming = false
+			return
+		end
+		Pool(class, key, slot)
+		C_Timer.After(0.05, step)
+	end
+	C_Timer.After(0.5, step)
+end
+ns.Listen("CONTEXT_CHANGED", Warm)
+ns.On("PLAYER_ENTERING_WORLD", Warm)
 
 local listCache = Cache()
 
@@ -782,23 +991,31 @@ function Gear.List(slotKey, ctx, opts)
 	local count = opts.count or ns.db.huntsPerSlot or 5
 	local full = FullList(slotKey, ctx)
 	local top = full[1] and full[1].score or 0
-	local filter = not opts.all and ns.Filters and ns.Filters.Pass
+	-- the done and removed views show what was marked, whatever the filters say
+	local filter = not opts.all and not opts.state and ns.Filters and ns.Filters.Pass
 	for rank, row in ipairs(full) do
 		if #out >= count then break end
 		local item = Gear.Item(row.id)
 		local state = Gear.State(row.id, row.suffix)
 		local keep = opts.states or not state
-		if opts.state then keep = state == opts.state end
-		local sources
+		if opts.state then
+			keep = state == opts.state
+		elseif state == "done" and not keep then
+			-- a done item that is worn stays: it is what the rows around it are compared with
+			keep = not ctx.preview and IsWornInHands(slotKey, row.id, row.suffix, item.hand) or false
+		end
+		local sources, passing
 		if keep and filter then
-			sources = Gear.Sources(row.id)
-			keep = filter({ id = row.id, score = row.score, req = row.req, item = item }, sources, ctx, opts.anyZone)
+			sources = Gear.Sources(row.id, ctx)
+			-- the source that passed is the one the row names: with "No dungeons" on, not the dungeon boss
+			keep, passing = filter({ id = row.id, score = row.score, req = row.req, item = item }, sources, ctx, opts.anyZone, opts.plain)
 		end
 		if keep then
 			local suffix = SuffixOf(item, row.suffix)
-			local worn = not ctx.preview and IsWorn(slotKey, row.id, row.suffix)
+			local worn = OwnGear(ctx) and IsWornInHands(slotKey, row.id, row.suffix, item.hand)
 			local toBeat = WornScore(slotKey, ctx, item.hand)
-			sources = sources or Gear.Sources(row.id)
+			sources = sources or Gear.Sources(row.id, ctx)
+			local source = type(passing) == "table" and passing or sources[1]
 			out[#out + 1] = {
 				id = row.id,
 				key = suffix and (row.id .. ":" .. suffix.id) or row.id,
@@ -818,7 +1035,9 @@ function Gear.List(slotKey, ctx, opts)
 				bind = item.bind,
 				tracked = Gear.IsTracked(row.id, row.suffix) or nil,
 				state = state,
-				source = sources[1],
+				source = source,
+				-- the source as one line, spoken of as its group ("29 creatures, Scarlet Monastery, +2 places")
+				summary = (Gear.SourceSummary(row.id, ctx, source)),
 			}
 		end
 	end
@@ -843,7 +1062,66 @@ function Gear.Rank(what, ctx)
 			if row.id == id and (not suffix or row.suffix == suffix) then return rank, #off end
 		end
 	end
+	-- An item that asks for no level and is had later than this one (reach): it is not in the list
+	-- of the level, and who has it can wear it. Its rank is where it would stand in that list.
+	if item.reach and item.req > ctx.level then
+		for _, row in ipairs(Pool(ctx.class, ctx.spec, item.slot)) do
+			if row.id == id and (not suffix or row.suffix == suffix) then
+				local rank = 1
+				for _, other in ipairs(full) do
+					if other.score > row.score then rank = rank + 1 end
+				end
+				return rank, #full + 1
+			end
+		end
+	end
 	return nil
+end
+
+-- Where an item ranks for the other specs of ctx's class: { { key, label, rank } }, best rank first.
+-- Only specs that list it.
+function Gear.OtherRanks(what, ctx)
+	ctx = Ctx(ctx)
+	local out = {}
+	if not ctx or not ctx.class then return out end
+	for order, spec in ipairs(Gear.Specs(ctx.class)) do
+		if spec.key ~= ctx.spec and Gear.SpecReady(ctx.class, spec.key, what) then
+			local other = {}
+			for k, v in pairs(ctx) do other[k] = v end
+			other.spec = spec.key
+			local rank = Gear.Rank(what, other)
+			if rank then out[#out + 1] = { key = spec.key, label = spec.label or spec.key, icon = spec.icon, rank = rank, order = order } end
+		end
+	end
+	table.sort(out, function(a, b)
+		if a.rank ~= b.rank then return a.rank < b.rank end
+		return a.order < b.order
+	end)
+	return out
+end
+
+-- The other specs of ctx's class the item is an upgrade for, the biggest gain first:
+-- { { key, label, icon, gain, delta, rank } }. For "keep it for my other spec?" (roll hints).
+function Gear.OtherGains(what, ctx)
+	ctx = Ctx(ctx)
+	local out = {}
+	if not ctx or not ctx.class or ctx.preview then return out end
+	for order, spec in ipairs(Gear.Specs(ctx.class)) do
+		if spec.key ~= ctx.spec and Gear.SpecReady(ctx.class, spec.key, what) then
+			local other = {}
+			for k, v in pairs(ctx) do other[k] = v end
+			other.spec = spec.key
+			local c = Gear.Compare(what, other)
+			if c and c.usable ~= false and not c.isWorn and type(c.delta) == "number" and c.delta > 0 then
+				out[#out + 1] = { key = spec.key, label = spec.label or spec.key, icon = spec.icon, gain = c.gain, delta = c.delta, rank = c.rank, order = order }
+			end
+		end
+	end
+	table.sort(out, function(a, b)
+		if (a.gain or 0) ~= (b.gain or 0) then return (a.gain or 0) > (b.gain or 0) end
+		return a.order < b.order
+	end)
+	return out
 end
 
 -- "twohand" when the best two-hander beats the best main hand and off hand together.
@@ -889,10 +1167,17 @@ function Gear.Compare(link, ctx)
 		if not slot then return nil end
 		return { slot = slot, usable = true, known = false }
 	end
-	local usable, reason = Gear.Usable(item, ctx)
+	local usable, reason, at = Gear.Usable(item, ctx)
 	local score = Gear.Score(link, ctx)
 	local result = { slot = item.slot, score = score, usable = usable, reason = reason, known = true }
 	result.rank = Gear.Rank(link, ctx)
+	if reason == "level" and at then
+		-- usable from a level: that level, and the rank it will have there
+		local later = {}
+		for key, value in pairs(ctx) do later[key] = value end
+		later.level = at
+		result.atLevel, result.rankAt = at, (Gear.Rank(link, later))
+	end
 	result.index = score and Points(item.slot, ctx, score) or nil
 	if not score or ctx.preview then return result end
 	-- a one-hander may go in either hand: take the better swap
@@ -907,25 +1192,26 @@ function Gear.Compare(link, ctx)
 				result.delta = delta
 				result.slot = slotKey
 				result.percent = toBeat > 0 and (delta / toBeat * 100) or nil
-				result.gain = Points(slotKey, ctx, delta, true)
-				result.index = Points(slotKey, ctx, score)
-				local worn = Gear.Worn(slotKey)
-				local low
-				for _, w in ipairs(worn) do
-					if not low or (w.score or 0) < (low.score or 0) then low = w end
-				end
-				result.worn = low and #worn >= #SLOT[slotKey].inv and { link = low.link, score = Gear.Score(low.link, ctx) } or nil
+				-- on the scale of the item's own list: a main-hand weapon put in a free off hand is
+				-- worth far more than the best shield, so on the off-hand scale every one reads +100
+				result.gain = Points(item.slot, ctx, delta, true)
+				result.index = Points(item.slot, ctx, score)
 			end
 		end
 	end
-	-- a link names its suffix; a bare id is any suffix
+	-- the item itself, in any slot it fits: a link names its suffix; a bare id is any suffix
 	local wornSuffix = false
 	if type(link) == "string" then wornSuffix = Gear.LinkSuffixID(link) end
-	if IsWorn(result.slot, id, wornSuffix) then
-		result.isWorn = true
-		result.delta = 0
-		result.percent = 0
-		result.gain = 0
+	for _, slotKey in ipairs(slots) do
+		if IsWorn(slotKey, id, wornSuffix) then
+			result.slot = slotKey
+			result.index = Points(item.slot, ctx, score)
+			result.isWorn = true
+			result.delta = 0
+			result.percent = 0
+			result.gain = 0
+			break
+		end
 	end
 	return result
 end
@@ -1115,18 +1401,9 @@ function Gear.StatDiff(link, ctx)
 	for key, value in pairs(stats) do diff[key] = value end
 	local dps = item.weapon and item.weapon.dps or nil
 
-	-- what it replaces: both hands for a two-hander, else the weaker item of the slot
-	local old = {}
-	if c.slot == "MainHand" and item.hand == "two" then
-		for _, w in ipairs(Gear.Worn("MainHand")) do old[#old + 1] = w end
-		for _, w in ipairs(Gear.Worn("OffHand")) do old[#old + 1] = w end
-	elseif #Gear.Worn(c.slot) >= #SLOT[c.slot].inv then
-		local low
-		for _, w in ipairs(Gear.Worn(c.slot)) do
-			if not low or (Gear.Score(w.link, ctx) or 0) < (Gear.Score(low.link, ctx) or 0) then low = w end
-		end
-		old[1] = low
-	end
+	-- what it takes off: both hands for a two-hander, a worn two-hander for an off-hand item,
+	-- else the weaker item of the slot
+	local old = Replaced(c.slot, item.hand, ctx)
 	local vs = {}
 	for i, w in ipairs(old) do
 		local wornStats, wornItem, wornSuffix = LinkStats(w.link, ctx, false)
@@ -1164,6 +1441,26 @@ function Gear.StatDiff(link, ctx)
 	return { vs = vs, rows = rows, attrs = attrs, suffix = suffix and { id = suffix.id, name = suffix.name } or nil }
 end
 
+-- An item's own stats, one line each ("+12 Agility"), in the order of the stat changes.
+-- The random suffix counts: the one in the link, else the best for ctx.
+function Gear.StatLines(link, ctx)
+	local stats = LinkStats(link, Ctx(ctx), true)
+	local keys = {}
+	for key, value in pairs(stats or {}) do
+		if math.abs(value) >= 0.005 then keys[#keys + 1] = key end
+	end
+	table.sort(keys, function(a, b)
+		local oa, ob = STAT_ORDER[a] or 99, STAT_ORDER[b] or 99
+		if oa ~= ob then return oa < ob end
+		return a < b
+	end)
+	for i, key in ipairs(keys) do
+		local value = stats[key]
+		keys[i] = Gear.StatText(key, value)
+	end
+	return keys
+end
+
 -- Sources ----------------------------------------------------------------------------------------
 
 local srcLine = Index("srcItems")
@@ -1175,11 +1472,25 @@ local instLine = Index("instAreas")
 
 local KIND_LABEL = {
 	boss = "Boss", drop = "Drop", rare = "Rare", object = "Chest", container = "Container", quest = "Quest",
-	vendor = "Vendor", craft = "Craft", world = "World drop", unknown = "Unknown",
+	vendor = "Vendor", craft = "Craft", world = "World drop", unknown = "Unknown", closed = "Raid not open",
 }
-local KIND_ORDER = { boss = 1, quest = 2, vendor = 3, craft = 4, rare = 5, drop = 6, object = 7, container = 8, world = 9, unknown = 10 }
+-- a box sorts after "World drop": the item's own world drop is the plainer answer
+local KIND_ORDER = { boss = 1, quest = 2, vendor = 3, craft = 4, rare = 5, drop = 6, object = 7, world = 8, container = 9, unknown = 10 }
 
 function Gear.KindLabel(kind) return KIND_LABEL[kind] or kind end
+
+-- The names of the game's icons (Data.iconNames, build/icons.lua): lower case, sorted, no folder.
+-- "Interface\\Icons\\" .. name is the texture. A new list on every call: 30,000 names are worth
+-- holding only while an icon list is open.
+function Gear.IconNames()
+	local out, before = {}, ""
+	-- each line: a letter for how many characters it shares with the line before, then the rest
+	for line in (Data.iconNames or ""):gmatch("[^\n]+") do
+		before = before:sub(1, line:byte(1) - 97) .. line:sub(2)
+		out[#out + 1] = before
+	end
+	return out
+end
 
 -- The profession an item needs to be worn (Data.itemSkill, build/skills.lua):
 -- { skill = skill line id, rank = number, name = "Engineering" }, or nil.
@@ -1220,7 +1531,8 @@ Gear.UNSURE_NOTE = "Vendor details are not confirmed yet. We are updating them."
 
 -- What one vendor asks for one item, where the build knows more than the item table
 -- (Data.vendorDeals, "npc:item" -> "faction^standing^cost^limited").
--- { faction, standing, gold = copper, costText = "100 Tarnished Undermine Real", limited = true }, or nil.
+-- { faction, standing, gold = copper, costText = "100 Tarnished Undermine Real",
+--   costs = { { kind = "c" (currency) | "i" (item), id, amount, name } }, limited = true }, or nil.
 local function VendorDeal(npc, id)
 	local line = npc and Data.vendorDeals and Data.vendorDeals[npc .. ":" .. id]
 	if not line then return nil end
@@ -1229,18 +1541,21 @@ local function VendorDeal(npc, id)
 	if cost and cost:sub(1, 1) == "g" then
 		deal.gold = tonumber(cost:sub(2))
 	elseif cost and cost ~= "" then
-		local parts = {}
-		for key, amount in cost:gmatch("([ci]%d+)x(%d+)") do
-			parts[#parts + 1] = amount .. " " .. (Data.vendorCostNames and Data.vendorCostNames[key] or key)
+		local parts, costs = {}, {}
+		for kind, what, amount in cost:gmatch("([ci])(%d+)x(%d+)") do
+			local name = Data.vendorCostNames and Data.vendorCostNames[kind .. what] or (kind .. what)
+			parts[#parts + 1] = amount .. " " .. name
+			costs[#costs + 1] = { kind = kind, id = tonumber(what), amount = tonumber(amount), name = name }
 		end
-		if #parts > 0 then deal.costText = table.concat(parts, ", ") end
+		if #parts > 0 then deal.costText, deal.costs = table.concat(parts, ", "), costs end
 	end
 	return deal
 end
 
 -- Fills a vendor source: vendor (type), label, need (what the item asks for), cost (copper) or
 -- costText (a currency or items), limited (limited stock), unsure (true when this vendor's price
--- or requirements are not confirmed).
+-- or requirements are not confirmed). The same as values, to compare with the character:
+-- rank (PvP rank), faction and standing (0 hated .. 7 exalted), costs (the parts of costText).
 -- seen: the collector's price for this vendor, -1 when it was not gold.
 local function VendorDetails(source, id, seen, npc)
 	local info = VendorItem(id)
@@ -1255,10 +1570,12 @@ local function VendorDetails(source, id, seen, npc)
 		kind = "pvp"
 		local rank = info.pvp - 4
 		source.need = "Rank " .. (rank > 0 and rank or info.pvp)
+		source.rank = rank > 0 and rank or nil
 	elseif faction then
 		kind = "rep"
 		local label = standing and (_G["FACTION_STANDING_LABEL" .. (standing + 1)] or STANDING[standing])
 		source.need = label and (faction .. ": " .. label) or faction
+		source.faction, source.standing = faction, standing
 	elseif special or costText or (info and not info.buy and not cost) then
 		kind = "currency"
 	end
@@ -1269,11 +1586,18 @@ local function VendorDetails(source, id, seen, npc)
 		elseif info and (kind == "gold" or kind == "rep") then cost = info.buy end
 	end
 	source.costText, source.limited = costText, deal and deal.limited or nil
+	source.costs = costText and deal.costs or nil
 	-- a vendor on the list of unconfirmed ones; 2: its gold price is known to be wrong
 	local doubt = npc and Data.vendorDoubt and Data.vendorDoubt[npc]
 	if doubt then
 		source.unsure = true
 		if doubt == 2 and not (seen and seen > 0) then cost = nil end
+	end
+	-- The game says what this character pays. A reputation or a rank takes up to a fifth off, and
+	-- the record is for every character of the account: a seen price a little under the table's is
+	-- that discount, and the table's price is the vendor's.
+	if seen and seen > 0 and doubt ~= 2 and info and info.buy and seen < info.buy and seen >= info.buy * 0.79 then
+		cost = info.buy
 	end
 	source.vendor, source.label, source.cost = kind, VENDOR_LABEL[kind], cost
 end
@@ -1347,35 +1671,91 @@ end
 Gear.Npc = Npc
 
 -- Line: name^area^inst^many^spots
+-- many: "1" for an object found all over (no spots), or "z" and the zones it is in ("z12,14,85")
+-- -> zones = { "Elwynn Forest", ... }, the one with the most of them first
 local function Object(id)
 	local line = objectLine(id)
 	if not line then return nil end
 	local f = split(line, "^")
-	return { id = id, name = f[1], area = num(f[2]), inst = num(f[3]), many = f[4] == "1", spots = Spots(f[5]) }
+	local object = { id = id, name = f[1], area = num(f[2]), inst = num(f[3]), many = f[4] ~= "", spots = Spots(f[5]) }
+	local list = f[4]:match("^z([%d,]+)$")
+	if list then
+		object.zones = {}
+		for areaId in list:gmatch("%d+") do
+			local area = Area(tonumber(areaId))
+			if area and area.name then object.zones[#object.zones + 1] = area.name end
+		end
+	end
+	return object
 end
 
--- Line: name^level^req^side^classMask^startKind:startId^area^dungeon^prev^next
+-- Line: name^level^req^side^classMask^startKind:startId^area^dungeon^prev^next^finishKind:finishId
+-- start: "n" an NPC, "o" an object, "i" an item (it has a source line of its own, like a box).
+-- dungeon: the area id of the dungeon or raid the quest is done in, or 1 when the data only says "raid quest".
+-- prev: the quests before it, "1,2" (all of them) or "1|2" (any one). A quest that is only a step
+-- of a chain has its name, levels and prev, and nothing else.
+-- finish: where it is turned in, when that is not where it starts.
 local function Quest(id)
 	local line = questLine(id)
 	if not line then return nil end
 	local f = split(line, "^")
 	local kind, start = (f[6] or ""):match("^(%a):(%d+)$")
+	local finishKind, finish = (f[11] or ""):match("^(%a):(%d+)$")
+	local inside = num(f[8])
+	local prevList = {}
+	for prev in (f[9] or ""):gmatch("%d+") do prevList[#prevList + 1] = tonumber(prev) end
 	return {
 		id = id, name = f[1], level = num(f[2]), req = num(f[3]), side = f[4] ~= "" and f[4] or nil,
-		classMask = num(f[5]), startKind = kind, start = num(start), area = num(f[7]), dungeon = f[8] == "1",
-		prev = f[9], next = num(f[10]),
+		classMask = num(f[5]), startKind = kind, start = num(start), area = num(f[7]),
+		dungeon = inside ~= nil, instArea = inside and inside > 1 and inside or nil,
+		prev = f[9], prevList = prevList, prevAny = (f[9] or ""):find("|", 1, true) ~= nil, next = num(f[10]),
+		finishKind = finishKind, finish = num(finish),
 	}
 end
 Gear.Quest = Quest
 
+-- Raids and the day they open on Forever, by instance map id ("YYYY-MM-DD"). A raid that is not
+-- listed has no date yet: its loot cannot be got. See STATUS.md, "Raids", for where this comes from.
+local RAID_OPENS = { [249] = "2026-12-09" } -- Onyxia's Lair
+Gear.RAID_OPENS = RAID_OPENS
+local MONTH = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" }
+
+-- Today as "YYYY-MM-DD". A function of its own so tests can set the day.
+function Gear.Today() return date("%Y-%m-%d") end
+
+-- open (bool), and the opening day as text ("9 Dec 2026") when one is known.
+local function RaidOpen(mapId)
+	local day = RAID_OPENS[mapId]
+	if not day then return false, nil end
+	local y, m, d = day:match("^(%d+)%-(%d+)%-(%d+)$")
+	return Gear.Today() >= day, ("%d %s %s"):format(tonumber(d), MONTH[tonumber(m)] or m, y)
+end
+
+-- Is the raid of a source closed today? source.raid: the raid's map id; 0: a raid, which one is not known.
+-- Returns closed (bool) and the opening day when one is known.
+local function RaidClosed(source)
+	if not source.raid then return false end
+	if source.raid == 0 then
+		for mapId in pairs(RAID_OPENS) do
+			if RaidOpen(mapId) then return false end
+		end
+		return true
+	end
+	local open, day = RaidOpen(source.raid)
+	return not open, day
+end
+
 -- Where a thing is: zone name, instance name, spots (the instance entrance when inside one).
+-- Inside a raid: raid = its map id, raidName = its name.
 local function Place(source, area, instArea, spots)
 	local inst = Inst(instArea)
 	if inst then
 		source.inst = inst.name
 		source.instMap = inst.mapId
 		local known = Data.instances and Data.instances[inst.mapId]
-		source.raid = known and known.kind == "raid" or false
+		-- "dungeon", "raid", or false: an instance area that is neither (PvP halls, battlegrounds)
+		source.instKind = known and known.kind or false
+		if source.instKind == "raid" then source.raid, source.raidName = source.raid or inst.mapId, source.raidName or inst.name end
 		source.zone = (Area(inst.parent) or {}).name or inst.name
 		source.spots = inst.spots
 	else
@@ -1384,12 +1764,14 @@ local function Place(source, area, instArea, spots)
 	end
 end
 
--- Drop chance from the player's own loot records, once there are enough kills.
+-- Drop chance from the player's own loot records, once there are enough kills. Never seen is no
+-- chance at all, not "0%": ten corpses do not prove it cannot drop.
 local function SeenChance(key, itemId)
 	local loot = ns.db and ns.db.collected and ns.db.collected.loot
 	local record = loot and loot[key]
 	if not record or (record.n or 0) < 10 then return nil end
 	local seen = record.items and record.items[itemId] or 0
+	if seen == 0 then return nil end
 	return math.floor(seen / record.n * 1000 + 0.5) / 10
 end
 
@@ -1404,10 +1786,12 @@ local function Join(first, second)
 	return first or second or ""
 end
 
-local sourceCache = {}
+local sourceCache = {} -- item id -> every source in the data
+local usableCache = {} -- "id/faction/class" -> the sources that character can use
 
--- srcItems line: fields "n:4831@16.5,123" "o:22" "c:500" "v:2679@3612" "q:6" "w:" (world drop)
-function Gear.Sources(id)
+-- Every source the data has for an item, whoever can use it.
+-- srcItems line: fields "n:4831@16.5,123" "o:22" "c:500" "v:2679@3612" "q:6" "w:25-35" (world drop, creature levels)
+local function AllSources(id)
 	local cached = sourceCache[id]
 	if cached then return cached end
 	local out = {}
@@ -1415,7 +1799,17 @@ function Gear.Sources(id)
 	for _, field in ipairs(split(line, "^")) do
 		local kind, list = field:match("^(%a):(.*)$")
 		if kind == "w" then
-			out[#out + 1] = { kind = "world", name = "World drop", text = "World drop" }
+			local low, high = list:match("^(%d+)%-(%d+)$")
+			out[#out + 1] = { kind = "world", name = "World drop", text = "World drop", minLevel = tonumber(low), maxLevel = tonumber(high) }
+		elseif kind == "p" then
+			-- a PvP rank reward of one faction ("p:H"). The data names no vendor. The rank is in the item
+			-- table for the classic sets ("Rank 7"); the Premier sets of Forever have none there.
+			local source = { kind = "vendor", side = list ~= "" and list or nil, spots = {} }
+			VendorDetails(source, id)
+			source.vendor, source.label, source.cost, source.unsure = "pvp", "PvP reward", nil, nil
+			source.name = source.need
+			source.text, source.need = source.name or "PvP reward", nil
+			out[#out + 1] = source
 		elseif kind then
 			for _, entry in ipairs(split(list, ",")) do
 				local ref, extra = entry:match("^(%d+)@?([%d%.]*)$")
@@ -1437,6 +1831,8 @@ function Gear.Sources(id)
 					if object then
 						local source = { kind = "object", name = object.name, object = ref, chance = SeenChance("o" .. ref, id) or extra }
 						Place(source, object.area, object.inst, object.spots)
+						-- found all over: the zones stand for the one zone the data files it under
+						source.zones = object.zones
 						source.text = Join(object.name, source.inst or source.zone) .. PercentText(source.chance)
 						out[#out + 1] = source
 					end
@@ -1456,14 +1852,42 @@ function Gear.Sources(id)
 				elseif kind == "q" then
 					local quest = ref and Quest(ref)
 					if quest then
-						local source = { kind = "quest", name = quest.name, quest = ref, level = quest.level, side = quest.side, dungeon = quest.dungeon }
+						local source = {
+							kind = "quest", name = quest.name, quest = ref, level = quest.level, side = quest.side,
+							classMask = quest.classMask, dungeon = quest.dungeon,
+						}
+						-- the dungeon or raid the quest cannot be done without, wherever its giver stands
+						local inside = quest.instArea and Inst(quest.instArea)
+						if inside then
+							local known = Data.instances and Data.instances[inside.mapId]
+							source.needs, source.needsKind = inside.name, known and known.kind or nil
+							if source.needsKind == "raid" then source.raid, source.raidName = inside.mapId, inside.name end
+						elseif quest.dungeon then
+							source.needsKind, source.raid = "raid", 0 -- the data says "raid quest" and no more
+						end
 						local giver = quest.startKind == "n" and Npc(quest.start) or (quest.startKind == "o" and Object(quest.start)) or nil
 						if giver then
 							Place(source, giver.area, giver.inst, giver.spots)
 							source.giver = giver.name
-						else
-							source.zone = (Area(quest.area) or {}).name
-							source.spots = {}
+						elseif quest.startKind == "i" then
+							-- started by an item: the quest begins where that item is found
+							source.starter = quest.start
+							source.starterName = Data.containerNames and Data.containerNames[quest.start]
+							local from = AllSources(quest.start)[1]
+							if from and from.kind ~= "unknown" then
+								source.zone, source.inst, source.instMap, source.instKind = from.zone, from.inst, from.instMap, from.instKind
+								source.spots = from.spots
+								source.raid, source.raidName = source.raid or from.raid, source.raidName or from.raidName
+							end
+						end
+						source.zone = source.zone or (Area(quest.area) or {}).name
+						source.spots = source.spots or {}
+						-- where it is turned in, when that is somebody else
+						local taker = quest.finishKind == "n" and Npc(quest.finish) or (quest.finishKind == "o" and Object(quest.finish)) or nil
+						if taker then
+							local at = {}
+							Place(at, taker.area, taker.inst, taker.spots)
+							source.turnIn, source.turnInAt = taker.name, at.inst or at.zone
 						end
 						source.text = Join("Quest: " .. quest.name, source.zone)
 						out[#out + 1] = source
@@ -1474,14 +1898,20 @@ function Gear.Sources(id)
 	end
 	local craft = Data.crafts and Data.crafts[id]
 	if craft then
-		-- "spell^profession^skill^recipeItem^id:count,id:count"
+		-- "spell^profession^skill^recipeItem^id:count,id:count^specialization^tool;tool^place^skillMax"
+		-- skill: the rank the recipe asks for. skillMax: when that is not in the data, the rank at which
+		-- the craft turns yellow: the skill needed is at most that.
 		local f = split(craft, "^")
 		local reagents = {}
 		for reagent, count in (f[5] or ""):gmatch("(%d+):(%d+)") do
 			reagents[#reagents + 1] = { id = tonumber(reagent), count = tonumber(count) }
 		end
+		local tools = {}
+		for tool in (f[7] or ""):gmatch("[^;]+") do tools[#tools + 1] = tool end
 		out[#out + 1] = {
-			kind = "craft", name = f[2], prof = f[2], skill = num(f[3]), spell = num(f[1]), recipe = num(f[4]),
+			kind = "craft", name = f[2], prof = f[2], profId = Data.professionIds and Data.professionIds[f[2]],
+			skill = num(f[3]), skillMax = num(f[9]), spell = num(f[1]), recipe = num(f[4]),
+			spec = f[6] ~= "" and f[6] or nil, tools = tools, place = f[8] ~= "" and f[8] or nil,
 			reagents = reagents, spots = {}, text = f[2] .. (num(f[3]) and (" " .. f[3]) or ""),
 		}
 	end
@@ -1514,8 +1944,175 @@ function Gear.Sources(id)
 	return out
 end
 
+local SIDE_LETTER = { Alliance = "A", Horde = "H" }
+
+local function MaskHasClass(mask, class)
+	for i, key in ipairs(Data.classOrder or {}) do
+		if key == class then return bit.band(mask, bit.lshift(1, i - 1)) ~= 0 end
+	end
+	return true
+end
+
+-- Can this character use the source? A quest or vendor of the other faction, a quest for another
+-- class, a creature that is friendly to the character's own faction: no.
+local function SourceUsable(s, ctx)
+	local mine = SIDE_LETTER[ctx.faction]
+	if s.kind == "quest" or s.kind == "vendor" then
+		if mine and s.side and s.side ~= mine and s.side ~= "AH" then return false end
+		if s.classMask and ctx.class and not MaskHasClass(s.classMask, ctx.class) then return false end
+	elseif s.npc and mine and s.side == mine then
+		return false
+	end
+	return true
+end
+
+-- A quest the player's own character has done: its reward cannot be had again. Not asked for a
+-- Simulator preview, which is about another character.
+local function QuestDone(s, ctx)
+	if s.kind ~= "quest" or ctx.preview or not s.quest then return false end
+	local me = ns.Me
+	return me ~= nil and type(me.QuestDone) == "function" and me.QuestDone(s.quest) == true
+end
+
+-- The sources of an item that the character of ctx can use today, best first (ctx: the player when
+-- left out). Left out: what SourceUsable refuses, sources in a raid that is not open, and quests
+-- the player has done.
+-- An item with no source left gets one entry that says why:
+--   kind "closed"   only in raids that are not open; text "Onyxia's Lair opens on 9 Dec 2026"
+--   kind "unknown"  nothing in the data, nothing for this faction and class, or only a quest
+--                   that is done (text "Quest done: The Eye of Paleth")
+function Gear.Sources(id, ctx)
+	ctx = ctx or Gear.PlayerContext() or {}
+	local key = id .. "/" .. tostring(ctx.faction) .. "/" .. tostring(ctx.class) .. "/" .. Gear.Today() .. (ctx.preview and "/preview" or "")
+	local cached = usableCache[key]
+	if cached then return cached end
+	local out, raid, opens, done = {}, nil, nil, nil
+	for _, s in ipairs(AllSources(id)) do
+		if SourceUsable(s, ctx) then
+			local closed, day = RaidClosed(s)
+			if QuestDone(s, ctx) then
+				done = done or s.name
+			elseif not closed then
+				out[#out + 1] = s
+			elseif not raid then
+				raid, opens = s.raidName or "Raid", day
+			end
+		end
+	end
+	if #out == 0 then
+		if raid then
+			local text = raid == "Raid" and "Raid not open" or (opens and (raid .. " opens on " .. opens) or (raid .. " is not open"))
+			out[1] = { kind = "closed", name = raid, opens = opens, spots = {}, text = text }
+		elseif done then
+			out[1] = { kind = "unknown", name = "Unknown", spots = {}, text = "Quest done: " .. done }
+		else
+			out[1] = { kind = "unknown", name = "Unknown", spots = {}, text = "Source unknown" }
+		end
+	end
+	usableCache[key] = out
+	return out
+end
+
+-- A quest handed in changes what its reward's sources say.
+ns.On("QUEST_TURNED_IN", function() Gear.ForgetSources() end)
+
+-- The sources of an item as groups for a detail view, in the order of Gear.Sources (ctx as there):
+--   - all plain drops are one group; group.byPlace splits it by place;
+--   - more than three bosses are one group as well, split by dungeon (shared loot of many bosses);
+--   - other sources of one kind and name are one group ("Solid Chest" in three zones);
+--   - a vendor and a quest stand alone: each has its own price or giver.
+-- Each: { kind, name (of the first source), names = { "Scarlet Sentry", ... }, sources = { ... },
+--   places = { "Duskwood", ... } (instance or zone names), chance (the best one, or nil),
+--   minLevel, maxLevel (or nil), source (the first one; it holds the spots of all when there are more) }
+-- byPlace (pooled drops and bosses only): a list of the same, one per place, with place = its name.
+-- The creatures with no known place come last, as one entry with place = nil.
+local MANY_BOSSES = 3
+
+local function AddOnce(list, value)
+	if value == nil then return end
+	for _, other in ipairs(list) do
+		if other == value then return end
+	end
+	list[#list + 1] = value
+end
+
+local function AddToGroup(g, s)
+	g.sources[#g.sources + 1] = s
+	AddOnce(g.names, s.name)
+	AddOnce(g.places, s.inst or s.zone)
+	-- a chest found all over: every zone it is in
+	for _, zone in ipairs(s.zones or {}) do AddOnce(g.places, zone) end
+	if s.chance and (not g.chance or s.chance > g.chance) then g.chance = s.chance end
+	if s.level then
+		g.minLevel = math.min(g.minLevel or s.level, s.level)
+		g.maxLevel = math.max(g.maxLevel or s.level, s.level)
+	end
+end
+
+-- The group's own source: the first one, with the spots of all when there are more.
+-- spotOf[spot] is the member a spot belongs to, so a pin can name its own creature.
+local function Seal(g)
+	if #g.sources < 2 then return end
+	local all = {}
+	for k, v in pairs(g.sources[1]) do all[k] = v end
+	all.spots, all.spotOf = {}, {}
+	for _, s in ipairs(g.sources) do
+		for _, spot in ipairs(s.spots or {}) do
+			all.spots[#all.spots + 1] = spot
+			all.spotOf[spot] = s
+		end
+	end
+	g.source = all
+end
+
+function Gear.SourceGroups(id, ctx)
+	local groups, byKey = {}, {}
+	local function group(list, index, key, s)
+		local g = index[key]
+		if not g then
+			g = { kind = s.kind, name = s.name, names = {}, sources = {}, places = {}, source = s }
+			index[key] = g
+			list[#list + 1] = g
+		end
+		AddToGroup(g, s)
+		return g
+	end
+	local sources = Gear.Sources(id, ctx)
+	local bosses = 0
+	for _, s in ipairs(sources) do
+		if s.kind == "boss" then bosses = bosses + 1 end
+	end
+	local places = {}
+	for _, s in ipairs(sources) do
+		local pooled = s.kind == "drop" or (s.kind == "boss" and bosses > MANY_BOSSES)
+		local key = (s.kind == "vendor" and s.npc) or (s.kind == "quest" and s.quest) or (pooled and "") or s.name
+		local g = group(groups, byKey, s.kind .. "\0" .. tostring(key), s)
+		if pooled then
+			g.byPlace = g.byPlace or {}
+			local place = s.inst or s.zone
+			group(g.byPlace, places, s.kind .. "\0" .. tostring(place or ""), s).place = place
+		end
+	end
+	for _, g in ipairs(groups) do
+		Seal(g)
+		local parts = g.byPlace or {}
+		for i, part in ipairs(parts) do
+			Seal(part)
+			if not part.place then parts.nowhere = i end
+		end
+		if parts.nowhere then -- no known place: last
+			local part = table.remove(parts, parts.nowhere)
+			parts.nowhere = nil
+			parts[#parts + 1] = part
+		end
+	end
+	return groups
+end
+
 -- Names of every zone and instance that holds a source, sorted.
+local zoneNames -- the data does not change: made once
 function Gear.Zones()
+	if zoneNames then return zoneNames end
 	local seen, out = {}, {}
 	for _, lineOf in ipairs({ areaLine, instLine }) do
 		local _, index = lineOf(0)
@@ -1528,22 +2125,135 @@ function Gear.Zones()
 		end
 	end
 	table.sort(out)
+	zoneNames = out
 	return out
 end
 
--- One plain line for the tooltip. A vendor comes with its type, what it asks for and the price:
--- "Kurran Steele, Elwynn Forest (vendor, 7s 92c)".
+-- A vendor source as one plain line: its type, what it asks for and the price.
+-- "Kurran Steele, Elwynn Forest (vendor, 7s 92c)", "Rank 7 (PvP reward)".
+local function VendorText(s)
+	if not s.label then return s.text end
+	local parts = { s.label:lower():gsub("^pvp", "PvP") .. "" }
+	if s.need then parts[#parts + 1] = s.need end
+	if s.costText then parts[#parts + 1] = s.costText
+	elseif s.cost and ns.UI and ns.UI.Money then parts[#parts + 1] = ns.UI.Money(s.cost) end
+	if s.limited then parts[#parts + 1] = "limited stock" end
+	if s.unsure then parts[#parts + 1] = Gear.UNSURE end
+	return s.text .. " (" .. table.concat(parts, ", ") .. ")"
+end
+
+-- "Scarlet Monastery, +2 places"
+local function PlacesText(g)
+	local first, n = g.places[1], #g.places
+	if not first then return nil end
+	return first .. (n > 1 and (", +" .. (n - 1) .. (n == 2 and " place" or " places")) or "")
+end
+
+-- One plain line that says how to get an item: the same answer for a tooltip, a list row and the
+-- wishlist. Returns text, kind, more (how many other groups of sources there are).
+-- ctx as Gear.Sources. source: the source to speak of (the one a list row passed its filters by);
+-- the best one when left out. A source is spoken of as its group (Gear.SourceGroups), so a drop
+-- from 29 creatures does not read like one creature's loot:
+--   "Lady Sarevess, Blackfathom Deeps"                     one creature
+--   "29 creatures, Scarlet Monastery, +2 places"           many
+--   "Solid Chest, Duskwood, +5 places"
+--   "Quest: Deep Trouble, Darkshore"
+--   "Kurran Steele, Elwynn Forest (vendor, 7s 92c)"
+--   "Blacksmithing 130, recipe: Gor'mak, The Barrens (reputation vendor, ...)"
+--   "World drop, level 13 to 25 creatures", "In: Eternium Lockbox"
+--   "Source unknown", "Naxxramas is not open"              kind "unknown", "closed"
+function Gear.SourceSummary(id, ctx, source, nested)
+	local groups = Gear.SourceGroups(id, ctx)
+	local g = groups[1]
+	for _, group in ipairs(source and groups or {}) do
+		for _, s in ipairs(group.sources) do
+			if s == source then g = group end
+		end
+	end
+	if not g then return "Source unknown", "unknown", 0 end
+	local s, kind = g.source, g.kind
+	local text = s.text
+	-- An item in chests of many names is the random loot of the world's chests. One line for all
+	-- of them: one chest must not read like the item's place ("Solid Chest, Duskwood" for a green
+	-- that is in nine kinds of chest).
+	if kind == "object" then
+		local kinds, all = 0, { places = {} }
+		for _, place in ipairs(g.places) do AddOnce(all.places, place) end
+		for _, group in ipairs(groups) do
+			if group.kind == "object" then
+				kinds = kinds + 1
+				for _, place in ipairs(group.places) do AddOnce(all.places, place) end
+			end
+		end
+		if kinds > MANY_BOSSES then
+			local where = PlacesText(all)
+			return "Chests of " .. kinds .. " kinds" .. (where and (", " .. where) or ""), kind, #groups - kinds
+		end
+	end
+	if kind == "world" then
+		if s.minLevel and s.maxLevel then text = text .. ", level " .. s.minLevel .. " to " .. s.maxLevel .. " creatures" end
+	elseif kind == "vendor" then
+		text = VendorText(s)
+	elseif kind == "craft" then
+		-- where the recipe comes from, when the data says
+		if s.recipe and not nested then
+			local recipe, recipeKind = Gear.SourceSummary(s.recipe, ctx, nil, true)
+			if recipeKind ~= "unknown" and recipeKind ~= "closed" then text = text .. ", recipe: " .. recipe end
+		end
+	elseif g.byPlace and #g.names > 1 then
+		-- the place with the most of them is the one named
+		local best, named = nil, 0
+		for _, part in ipairs(g.byPlace) do
+			if part.place then
+				named = named + 1
+				if not best or #part.names > #best.names then best = part end
+			end
+		end
+		text = #g.names .. (kind == "boss" and " bosses" or " creatures")
+		if best then
+			text = text .. ", " .. best.place .. (named > 1 and (", +" .. (named - 1) .. (named == 2 and " place" or " places")) or "")
+		end
+	elseif #g.places > 1 then
+		text = (g.name or s.name or "?") .. ", " .. PlacesText(g)
+	end
+	return text, kind, #groups - 1
+end
+
+-- The summary for the player's own character, for a tooltip or the wishlist, with a note when the
+-- item has other sources too: "Razorfen Spearhide, Razorfen Kraul (+2 other sources)".
+-- nil when no source is known.
 function Gear.SourceText(id)
-	local first = Gear.Sources(id)[1]
-	if not first or first.kind == "unknown" then return nil end
-	if first.kind ~= "vendor" or not first.label then return first.text end
-	local parts = { first.label:lower():gsub("^pvp", "PvP") .. "" }
-	if first.need then parts[#parts + 1] = first.need end
-	if first.costText then parts[#parts + 1] = first.costText
-	elseif first.cost and ns.UI and ns.UI.Money then parts[#parts + 1] = ns.UI.Money(first.cost) end
-	if first.limited then parts[#parts + 1] = "limited stock" end
-	if first.unsure then parts[#parts + 1] = Gear.UNSURE end
-	return first.text .. " (" .. table.concat(parts, ", ") .. ")"
+	local text, kind, more = Gear.SourceSummary(id)
+	if kind == "unknown" then return nil end
+	if more > 0 then text = text .. (" (+%d other %s)"):format(more, more == 1 and "source" or "sources") end
+	return text
+end
+
+-- Where to go for an item: its usable sources that have a place on the map, best first. An item
+-- whose own sources have none leads to its recipe (a craft) or to where its box comes from.
+-- Each: { source, via }, via = "recipe" or "box" when the place is that thing's, not the item's.
+local function Placed(s) return type(s.spots) == "table" and #s.spots > 0 end
+function Gear.Ways(id, ctx)
+	local out = {}
+	local sources = Gear.Sources(id, ctx)
+	for _, s in ipairs(sources) do
+		if Placed(s) then out[#out + 1] = { source = s } end
+	end
+	if #out > 0 then return out end
+	for _, s in ipairs(sources) do
+		local other = (s.kind == "craft" and s.recipe) or (s.kind == "container" and s.container) or nil
+		for _, way in ipairs(other and Gear.Sources(other, ctx) or {}) do
+			if Placed(way) then out[#out + 1] = { source = way, via = s.kind == "craft" and "recipe" or "box" } end
+		end
+	end
+	return out
+end
+
+-- The best of Gear.Ways: source, via. nil when nothing has a place.
+function Gear.WayTo(id, ctx)
+	local first = Gear.Ways(id, ctx)[1]
+	if first then return first.source, first.via end
+	return nil
 end
 
 function Gear.UnsureMark() return Gear.UNSURE end
@@ -1556,7 +2266,7 @@ end
 
 -- Collected data changes what sources say.
 function Gear.ForgetSources()
-	sourceCache = {}
+	sourceCache, usableCache = {}, {}
 end
 
 -- Who drops, sells or rewards what: built from the item lines the first time it is asked.
@@ -1579,6 +2289,10 @@ local function Reverse()
 	end
 	return reverse
 end
+-- Made a moment after login, so that the first creature under the mouse does not wait for it.
+ns.On("PLAYER_ENTERING_WORLD", function()
+	if not reverse and C_Timer and Gear.Ready() then C_Timer.After(3, function() Reverse() end) end
+end)
 
 function Gear.NpcDrops(npcId)
 	local list = npcId and Reverse().n[npcId]
@@ -1590,11 +2304,18 @@ function Gear.NpcDrops(npcId)
 	return out
 end
 
+-- What an NPC sells. Each row carries what a vendor source does (VendorDetails):
+-- { id, vendor, label, need, cost, costText, limited, unsure }
 function Gear.NpcSells(npcId)
 	local list = npcId and Reverse().v[npcId]
 	if not list then return nil end
+	local seen = ns.db and ns.db.collected and ns.db.collected.vendors and ns.db.collected.vendors[npcId]
 	local out = {}
-	for _, row in ipairs(list) do out[#out + 1] = { id = row.id, cost = row.extra } end
+	for _, row in ipairs(list) do
+		local sale = { id = row.id }
+		VendorDetails(sale, row.id, (seen and seen.items and seen.items[row.id]) or row.extra, npcId)
+		out[#out + 1] = sale
+	end
 	return out
 end
 
@@ -1604,6 +2325,41 @@ function Gear.QuestRewards(questId)
 	local out = {}
 	for _, row in ipairs(list) do out[#out + 1] = row.id end
 	return out
+end
+
+-- The quests an NPC gives that reward gear: a list of quest ids, or nil.
+local givers
+function Gear.NpcQuests(npcId)
+	if not givers then
+		givers = {}
+		for questId in pairs(Reverse().q) do
+			local quest = Quest(questId)
+			if quest and quest.startKind == "n" and quest.start then
+				givers[quest.start] = givers[quest.start] or {}
+				table.insert(givers[quest.start], questId)
+			end
+		end
+		for _, list in pairs(givers) do table.sort(list) end
+	end
+	return npcId and givers[npcId] or nil
+end
+
+-- The gear a recipe item teaches to make: a list of item ids, or nil. (A recipe is not gear:
+-- Gear.Item(recipe) is nil.)
+local taught
+function Gear.RecipeProducts(recipeId)
+	if not taught then
+		taught = {}
+		for product, line in pairs(Data.crafts or {}) do
+			local recipe = tonumber((split(line, "^"))[4])
+			if recipe then
+				taught[recipe] = taught[recipe] or {}
+				table.insert(taught[recipe], product)
+			end
+		end
+		for _, list in pairs(taught) do table.sort(list) end
+	end
+	return recipeId and taught[recipeId] or nil
 end
 
 -- Enchants -----------------------------------------------------------------------------------------
@@ -1636,7 +2392,8 @@ function Gear.BestEnchant(slotKey, ctx)
 				end
 				if enchant.dmg then score = score + enchant.dmg / 2.4 * (rec.dps or 0) end
 				if score > 0 and (not best or score > best.score) then
-					best = { id = enchant.id, name = enchant.name, spell = enchant.spell, item = enchant.item, score = score, text = enchant.text or enchant.name }
+					best = { id = enchant.id, name = enchant.name, spell = enchant.spell, item = enchant.item, score = score,
+						text = enchant.text or enchant.name, prof = enchant.prof, skill = enchant.skill }
 				end
 			end
 		end
@@ -1677,7 +2434,7 @@ local function Install(class, spec)
 	local base = byClass[spec.base] or {}
 	byClass[spec.key] = {
 		label = spec.label, custom = true, weights = spec.weights, dps = spec.dps, dpsRanged = spec.dpsRanged,
-		armorMult = base.armorMult, flags = base.flags, speed = base.speed,
+		armorMult = base.armorMult, flags = base.flags, speed = base.speed, role = base.role,
 	}
 end
 
@@ -1695,10 +2452,15 @@ function Gear.SaveCustom(class, spec)
 end
 
 function Gear.DeleteCustom(class, key)
+	local saved = ns.db.customSpecs[class] and ns.db.customSpecs[class][key]
 	if ns.db.customSpecs[class] then ns.db.customSpecs[class][key] = nil end
 	local byClass = ClassWeights(class)
 	if byClass and byClass[key] and byClass[key].custom then byClass[key] = nil end
-	if ns.char.spec == key then ns.char.spec = nil end
+	-- the spec in use: back to the one it was made from, wherever it was deleted
+	if ns.char.spec == key then
+		local base = saved and saved.base
+		ns.char.spec = base and byClass and byClass[base] and base or nil
+	end
 	ContextChanged()
 end
 
