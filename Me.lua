@@ -8,6 +8,7 @@ local _, ns = ...
 --   Me.Skill(name, id)         skill rank; 0: the character does not have that skill
 --   Me.Standing(name, id)      standing with a faction, 0 hated .. 3 neutral .. 7 exalted (as Data.vendorItems)
 --   Me.QuestDone(id)           true or false
+--   Me.OnQuest(id)             true when the quest is in the quest log
 --   Me.PvpRank()               PvP rank 1..14; 0: none
 --   Me.Count(kind, id)         how many the character has: kind "c" a currency, "i" an item (bank counted)
 --   Me.Knows(spell)            true when the character knows the spell (a craft); never false
@@ -110,6 +111,15 @@ function Me.Standing(name, id)
 end
 
 -- Quests, rank, things ---------------------------------------------------------------------
+
+-- True when the quest is in the quest log, false when it is not, nil when the game gave no answer.
+function Me.OnQuest(id)
+	local log = C_QuestLog
+	if not id or type(log) ~= "table" or type(log.IsOnQuest) ~= "function" then return nil end
+	local on = Try(log.IsOnQuest, id)
+	if on == nil then return nil end
+	return on and true or false
+end
 
 function Me.QuestDone(id)
 	if not id then return nil end

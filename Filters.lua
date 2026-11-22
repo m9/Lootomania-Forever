@@ -42,7 +42,7 @@ local KIND_TIP = {
 -- Hidden until the player asks for them: an item nobody can say how to get, or cannot be got yet.
 local HIDDEN_BY_DEFAULT = { unknown = true, closed = true }
 
--- Vendor types (Gear.VENDOR_TYPES), for the filters window.
+-- Vendor types, for the filters window.
 F.VENDORS = { "gold", "rep", "pvp", "currency" }
 local VENDOR_LABEL = { gold = "Gold", rep = "Reputation", pvp = "PvP rank", currency = "Other currency" }
 
@@ -261,6 +261,10 @@ local function SourcePass(s, entry, level, faction, anyZone)
 	if st.focusZone and not anyZone then
 		local zone = st.zone
 		if zone and (s.zone == zone or s.inst == zone) then return true end
+		-- a chest found in many zones is filed under one
+		for i = 1, zone and s.zones and #s.zones or 0 do
+			if s.zones[i] == zone then return true end
+		end
 		if st.map and s.spots then
 			for i = 1, #s.spots do
 				if s.spots[i].map == st.map then return true end
@@ -653,7 +657,7 @@ local function BuildWindow()
 	UI.Tip(window.reset, "Reset filters", { "Back to the default: no rule, any zone." })
 	window.note = UI.Text(body, "GameFontHighlightSmall", C.FAINT)
 	window.note:SetPoint("BOTTOMLEFT", 0, 4)
-	window.note:SetText("\"not confirmed\" on an item: its vendor's price is still being checked.")
+	window.note:SetText("Not confirmed: the vendor details are not checked yet.")
 end
 
 local function FillWindow()

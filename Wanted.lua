@@ -36,15 +36,16 @@ local function Stats(id)
 	return s
 end
 
-function W.Has(item)
-	local id = ns.ItemID(item)
-	local Gear = ns.Gear
-	return id ~= nil and Gear ~= nil and Gear.IsTracked ~= nil and Gear.IsTracked(id) or false
-end
-
 local function Suffix(item)
 	local Gear = ns.Gear
 	return type(item) == "string" and Gear.LinkSuffixID and Gear.LinkSuffixID(item) or nil
+end
+
+-- A link counts with its random suffix: another suffix than the tracked one is not tracked.
+function W.Has(item)
+	local id = ns.ItemID(item)
+	local Gear = ns.Gear
+	return id ~= nil and Gear ~= nil and Gear.IsTracked ~= nil and Gear.IsTracked(id, Suffix(item)) or false
 end
 
 -- Tracks an item (ID or link; a link's random suffix is the one to look for). Returns the item
@@ -60,6 +61,11 @@ function W.Add(item)
 	end
 	if not Info(id) and C_Item and C_Item.RequestLoadItemDataByID then pcall(C_Item.RequestLoadItemDataByID, id) end
 	local suffix = Suffix(item)
+	if not suffix and Gear.WantedSuffix then
+		-- no suffix given: look for the one the tracker names (the best for the spec)
+		local best = Gear.WantedSuffix(id, Gear.PlayerContext and Gear.PlayerContext() or nil)
+		suffix = best and best.id or nil
+	end
 	local had = Gear.IsTracked(id)
 	Gear.Track(id, true, suffix) -- a done or removed mark goes with it
 	if not had then Stats(id).added = time() end
@@ -85,7 +91,7 @@ function W.Toggle(item)
 	local id = ns.ItemID(item)
 	if not id then return false end
 	local link = LinkOf(item, id)
-	if W.Has(id) then
+	if W.Has(item) then
 		W.Remove(id)
 		ns.Print("Untracked: " .. link)
 		return false
@@ -209,6 +215,8 @@ local function TakeWishlist()
 		end
 		if fits and not hunts.tracked[id] and not hunts.state[id] then
 			hunts.tracked[id] = true
+			local best = Gear.WantedSuffix and Gear.WantedSuffix(id, player)
+			if best then hunts.suffix[id] = best.id end
 			local was = type(ns.db.wishStats) == "table" and ns.db.wishStats[id]
 			local s = Stats(id)
 			if type(was) == "table" then
@@ -228,7 +236,7 @@ ns.OnLoad(function() ns.Safe(TakeWishlist) end)
 -- Loot ----------------------------------------------------------------------------------------
 
 ns.Listen("LOOT_DECIDED", function(drop, run)
-	if not drop or not drop.id or not W.Has(drop.id) then return end
+	if not drop or not drop.id or not W.Has(drop.link or drop.id) then return end
 	local s = Stats(drop.id)
 	s.tries = s.tries + 1
 	if drop.me and drop.me.w then s.wins = s.wins + 1 end
@@ -445,6 +453,10 @@ end
 ns.Main.AddTab("tracked", "Tracked", 200, BuildTab, Fill)
 
 ns.Listen("HUNTS_CHANGED", function() ns.Main.Refresh("tracked") end)
+-- what an item is worth changes with what is worn and with the spec; later, so the tracker has emptied its cache
+local worthChanged = ns.Debounce(0.05, function() ns.Main.Refresh("tracked") end)
+ns.Listen("GEAR_CHANGED", worthChanged)
+ns.Listen("CONTEXT_CHANGED", worthChanged)
 
 -- names and links come late for items the game has not seen
 local refresh = ns.Debounce(0.5, function() ns.Main.Refresh("tracked") end)

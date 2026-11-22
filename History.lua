@@ -165,8 +165,10 @@ local flushSoon
 
 local function Leave(run, tries)
 	run.left = run.left or Now()
+	local left = run.left
 	C_Timer.After(LEAVE_WAIT, function()
-		if current ~= run or not run.left then return end
+		-- a timer of an earlier leave: the character came back and went out again
+		if current ~= run or run.left ~= left then return end
 		-- a wipe: the ghost is outside and walks back in. The run goes on while the character is dead.
 		if UnitIsDeadOrGhost and UnitIsDeadOrGhost("player") then
 			Leave(run, tries)
@@ -289,16 +291,19 @@ local function Record(eid, d, link, info)
 	end
 
 	for _, row in ipairs(rows) do
-		local p = run.players[row.n]
-		if not p then
+		-- a hidden name ("?") is no one player: it stays out of the run's table
+		local p = row.n ~= "?" and run.players[row.n] or nil
+		if not p and row.n ~= "?" then
 			p = { c = row.c, won = 0, need = 0, greed = 0, pass = 0 }
 			run.players[row.n] = p
 		end
-		p.c = p.c or row.c
-		if row.ch then p[row.ch] = p[row.ch] + 1 end
-		if row.w then p.won = p.won + 1 end
+		if p then
+			p.c = p.c or row.c
+			if row.ch then p[row.ch] = p[row.ch] + 1 end
+			if row.w then p.won = p.won + 1 end
+		end
 		if row.me then
-			p.me = true
+			if p then p.me = true end
 			drop.me = { ch = row.ch, r = row.r, w = row.w }
 		end
 	end
@@ -812,7 +817,7 @@ local function FillDrop(row, drop, where)
 	UI.Color(row.name, quality and UI.QUALITY[quality] or C.TEXT)
 	-- still an upgrade for the player: its gain after the boss
 	local worth, delta
-	if drop.id and ns.Tracker and ns.Tracker.Worth then worth, delta = ns.Tracker.Worth(drop.id) end
+	if drop.id and ns.Tracker and ns.Tracker.Worth then worth, delta = ns.Tracker.Worth(drop.id, drop.link) end
 	row.boss:SetText(where .. (worth and delta and delta > 0 and ("   " .. worth) or ""))
 	local w = drop.winner
 	if w then
@@ -963,13 +968,18 @@ local function BuildTab(panel)
 		-- second click deletes
 		if self.armed ~= view.selected then
 			self.armed = view.selected
+			local at = GetTime()
+			self.armedAt = at
 			self:SetLabel("Sure?")
 			C_Timer.After(3, function()
+				-- the timer of an earlier click does not disarm a later one
+				if self.armedAt ~= at then return end
 				self.armed = nil
 				self:SetLabel("Delete")
 			end)
 			return
 		end
+		self.armedAt = nil
 		self.armed = nil
 		self:SetLabel("Delete")
 		if view.selected then H.Delete(view.selected) end
@@ -1012,6 +1022,10 @@ end
 ns.Main.AddTab("history", "History", 300, BuildTab, function() view.Fill() end)
 
 ns.Listen("HISTORY_CHANGED", function() ns.Main.Refresh("history") end)
+-- the gain shown for a drop changes with what is worn and with the spec
+local worthChanged = ns.Debounce(0.05, function() ns.Main.Refresh("history") end)
+ns.Listen("GEAR_CHANGED", worthChanged)
+ns.Listen("CONTEXT_CHANGED", worthChanged)
 
 ns.Command("history", "History. Also: post, clear", function(rest)
 	rest = (rest or ""):lower()

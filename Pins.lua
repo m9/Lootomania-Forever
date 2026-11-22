@@ -36,13 +36,16 @@ local driver
 
 -- Pin list ----------------------------------------------------------------------------
 
-local function AddSpot(spot, source, item, have)
+-- via: the place is the recipe's or the box's, not the item's own
+local VIA = { recipe = "Recipe: ", box = "Box: " }
+
+local function AddSpot(spot, source, item, have, via)
 	if #list >= MAX_PINS then return false end
 	if not (type(spot) == "table" and spot.map and spot.x and spot.y) then return false end
 	local key = ("%s:%s:%.1f:%.1f"):format(tostring(item), spot.map, spot.x, spot.y)
 	if have[key] then return false end
 	have[key] = true
-	list[#list + 1] = { spot = spot, source = source, item = item }
+	list[#list + 1] = { spot = spot, source = source, item = item, via = via }
 	return true
 end
 
@@ -62,7 +65,7 @@ local function AddTracked(ways, item, have, mapId)
 			for i = 1, #spots do
 				if left <= 0 then return end
 				local spot = spots[i]
-				if type(spot) == "table" and (pass == 2 or spot.map == mapId) and AddSpot(spot, way.source, item, have) then
+				if type(spot) == "table" and (pass == 2 or spot.map == mapId) and AddSpot(spot, way.source, item, have, way.via) then
 					left = left - 1
 				end
 			end
@@ -163,13 +166,14 @@ local function Tooltip(self)
 		GameTooltip:SetText(source.name or "Source", C.GOLD[1], C.GOLD[2], C.GOLD[3])
 	end
 	local text = source.text or source.name
-	if text then GameTooltip:AddLine(text, C.TEXT[1], C.TEXT[2], C.TEXT[3], true) end
+	if text then GameTooltip:AddLine((VIA[pin.via] or "") .. text, C.TEXT[1], C.TEXT[2], C.TEXT[3], true) end
 	-- the place of something in an instance is the way in
 	if source.inst and source.instMap then
 		GameTooltip:AddLine("Entrance: " .. source.inst, C.MUTED[1], C.MUTED[2], C.MUTED[3])
 	end
-	if source.chance then
-		GameTooltip:AddLine(("Chance: %s%%"):format(tostring(source.chance)), C.MUTED[1], C.MUTED[2], C.MUTED[3])
+	local chance = ns.ChanceText(source.chance)
+	if chance then
+		GameTooltip:AddLine("Chance: " .. chance, C.MUTED[1], C.MUTED[2], C.MUTED[3])
 	end
 	-- the other tracked items of this spot: their pins are under this one
 	for _, other in ipairs(self.more or {}) do
@@ -187,7 +191,9 @@ local function Click(self, button)
 	local pin = self.pin
 	if not pin or button ~= "LeftButton" or not ns.Guide then return end
 	local source = pin.source.spotOf and pin.source.spotOf[pin.spot] or pin.source
-	ns.Guide.Set(pin.spot, ns.Guide.Label and ns.Guide.Label(source) or source.name or source.text, pin.item)
+	local label = ns.Guide.Label and ns.Guide.Label(source) or source.name or source.text
+	if VIA[pin.via] and label then label = VIA[pin.via] .. label end
+	ns.Guide.Set(pin.spot, label, pin.item)
 end
 
 local function NewPin(canvas)
@@ -334,7 +340,7 @@ function Pins.Show(source, itemId)
 	local spots = type(source) == "table" and type(source.spots) == "table" and source.spots or nil
 	local spot = spots and spots[1]
 	if not spot or not spot.map then
-		ns.Print("No spot known.")
+		ns.Print("No place on the map for it.")
 		return false
 	end
 	if ns.Guide and ns.Guide.Nearest then spot = ns.Guide.Nearest(spots) or spot end

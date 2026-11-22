@@ -527,7 +527,10 @@ end
 
 -- The creatures of one place: a row each, a click opens the creature.
 function Side.Creatures(title, sources, from)
-	local key = title
+	-- two lists can share a title ("Wetlands"): the creatures tell them apart
+	local names = {}
+	for i, s in ipairs(sources) do names[i] = tostring(s.npc or s.name) end
+	local key = title .. "\0" .. table.concat(names, ",")
 	local function open() return Side.Creatures(title, sources, from) end
 	return Open("creatures", key, title, #sources .. (#sources == 1 and " creature" or " creatures"), function()
 		local first = sources[1]
@@ -554,7 +557,10 @@ local function StepLines(steps)
 end
 
 function Side.Steps(title, steps)
-	return Open("steps", title, title, #steps .. " steps", function() StepLines(steps) end)
+	-- two plans can share a title ("Craft: Blacksmithing"): the steps tell them apart
+	local texts = {}
+	for i, step in ipairs(steps) do texts[i] = step.text end
+	return Open("steps", title .. "\0" .. table.concat(texts, "\0"), title, #steps .. " steps", function() StepLines(steps) end)
 end
 
 local INSIDE = { dungeon = "Dungeon", raid = "Raid" }
@@ -682,10 +688,7 @@ function Side.Item(id, from)
 			if #steps >= (U and U.MIN_STEPS or 3) then
 				if click then
 					-- the whole plan is one click away: the step to do now
-					local next
-					for n, step in ipairs(steps) do
-						if step.done ~= true then next = n break end
-					end
+					local next = U and U.NextStep and U.NextStep(steps)
 					Line(next and ("Next step, %d of %d: %s"):format(next, #steps, steps[next].text) or ("All " .. #steps .. " steps done"), C.TEXT)
 				else
 					Gap(4)
@@ -716,6 +719,18 @@ end
 
 -- Opens the main window with the item's view beside it. item: an id or a link.
 -- Returns false for an item that is not in the data.
+-- The item view shows what the item is worth: draw it again when gear or spec change (later, so the
+-- tracker has emptied its cache first).
+local itemChanged = ns.Debounce(0.05, function()
+	local kind, key = Side.Current()
+	if kind ~= "item" then return end
+	again = true
+	ns.Safe(Side.Item, key, back)
+	again = false
+end)
+ns.Listen("GEAR_CHANGED", itemChanged)
+ns.Listen("CONTEXT_CHANGED", itemChanged)
+
 function Side.Show(item)
 	local id = ns.ItemID(item)
 	local Gear = ns.Gear

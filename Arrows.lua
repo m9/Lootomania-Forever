@@ -336,7 +336,6 @@ Arrows.hooks = hooks -- what was found on this client, for /lm debug checks
 ns.OnLoad(function()
 	hooks.questDisplay = Hook("QuestInfo_Display", Arrows.UpdateQuest)
 	hooks.questRewards = Hook("QuestInfo_ShowRewards", Arrows.UpdateQuest)
-	hooks.lootUpdate = Hook("LootFrame_Update", Arrows.UpdateLoot)
 	hooks.merchant = Hook("MerchantFrame_Update", Arrows.UpdateMerchant)
 
 	local box = _G.LootFrame and _G.LootFrame.ScrollBox
@@ -389,10 +388,7 @@ local function SelfLoot()
 	for _, key in ipairs({ "LOOT_ITEM_SELF", "LOOT_ITEM_SELF_MULTIPLE", "LOOT_ITEM_PUSHED_SELF", "LOOT_ITEM_PUSHED_SELF_MULTIPLE" }) do
 		local text = _G[key]
 		if type(text) == "string" and text ~= "" then
-			text = text:gsub("%%%d+%$", "%%")
-			text = text:gsub("[%^%$%(%)%.%[%]%*%+%-%?]", "%%%0")
-			text = text:gsub("%%s", ".+"):gsub("%%d", "%%d+")
-			selfLoot[#selfLoot + 1] = "^" .. text .. "$"
+			selfLoot[#selfLoot + 1] = ns.ToPattern(text)
 		end
 	end
 	return selfLoot
@@ -414,7 +410,7 @@ ns.On("CHAT_MSG_LOOT", function(_, message)
 	if not link then return end
 	-- a tracked item has its own "Got it" message
 	local id = ns.ItemID(link)
-	if id and ns.Gear.IsTracked and ns.Gear.IsTracked(id) then return end
+	if id and ns.Gear.IsTracked and ns.Gear.IsTracked(id, ns.Gear.LinkSuffixID and ns.Gear.LinkSuffixID(link) or nil) then return end
 	local gain = Arrows.Gain(link)
 	if gain then
 		ns.Print(("Upgrade looted: %s +%d"):format(link, math.max(1, math.floor(gain + 0.5))))

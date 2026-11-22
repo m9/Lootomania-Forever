@@ -137,7 +137,8 @@ local function Build(panel)
 end
 
 ns.Main.AddTab("simulator", "Simulator", 150, Build, function()
-	if not sim then Init() end
+	if not sim then Init()
+	elseif not HasSpec(sim.class, sim.spec) then sim.spec = FirstSpec(sim.class) or sim.spec end -- a spec deleted meanwhile
 	Fill()
 end)
 

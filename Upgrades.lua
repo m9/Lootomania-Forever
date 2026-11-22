@@ -31,12 +31,6 @@ U.List = List
 
 -- Text helpers ------------------------------------------------------------------------------
 
-local function Num(v)
-	if v == math.floor(v) or math.abs(v) >= 100 then return ("%d"):format(v) end
-	return ("%.1f"):format(v)
-end
-U.Num = Num
-
 -- A gain in points (100 is the best item of the slot at this level): "+12" in green, "-3" in red, "Same".
 -- A real change never reads 0.
 local function GainText(d)
@@ -56,8 +50,7 @@ end
 U.DeltaText = DeltaText
 
 local function Chance(chance)
-	if type(chance) ~= "number" then return nil end
-	return (chance >= 10 and "%d%%" or "%.1f%%"):format(chance)
+	return ns.ChanceText(chance)
 end
 
 -- One line for a source: "Boss: Lady Sarevess, Blackfathom Deeps, 12%".
@@ -79,7 +72,7 @@ local function SourceLine(s, full)
 	if s.limited then parts[#parts + 1] = "limited stock" end
 	if s.unsure then parts[#parts + 1] = UI.Colored(Call("UnsureMark") or "not confirmed", C.FAINT) end
 	if full then
-		if s.level then parts[#parts + 1] = "Lvl " .. s.level end
+		if s.level then parts[#parts + 1] = "Level " .. s.level end
 		if s.prof and not text:find(s.prof, 1, true) then
 			parts[#parts + 1] = s.prof .. (s.skill and (" " .. s.skill) or "")
 		elseif s.skill and not text:find(tostring(s.skill), 1, true) then
@@ -281,8 +274,6 @@ function U.Overview(parent, width)
 end
 
 -- Tab ---------------------------------------------------------------------------------------------
-
-ns.Defaults({ upHideBelowWorn = false })
 
 local view = {}
 local sel -- selected slot key; nil: all slots
@@ -530,6 +521,13 @@ local MAX_AFTER = 3 -- quests named on the "After:" line
 
 -- What the game says about the player's own character (ns.Me: Me.Skill, Me.Standing, ...), or
 -- nil: the game gave no answer, or the list is about another character (the Simulator's preview).
+-- A quest of the other faction: its step is left out of "After:" (the same step has a version for each side).
+local function OtherSide(quest)
+	local ctx = Call("Context")
+	local mine = type(ctx) == "table" and type(ctx.faction) == "string" and ctx.faction:sub(1, 1)
+	return mine and quest.side and quest.side ~= mine and quest.side ~= "AH" or false
+end
+
 local function Mine(name, ...)
 	local me = ns.Me
 	if type(me) ~= "table" or type(me[name]) ~= "function" then return nil end
@@ -641,7 +639,7 @@ local function GroupText(g)
 		local before = {}
 		for _, id in ipairs(quest.prevList or {}) do
 			local prev = Call("Quest", id)
-			if type(prev) == "table" and prev.name then
+			if type(prev) == "table" and prev.name and not OtherSide(prev) then
 				local name = prev.name == s.name and "its earlier parts" or prev.name
 				if Mine("QuestDone", id) == true then name = name .. UI.Colored(" (done)", C.GREEN) end
 				before[#before + 1] = name
@@ -737,7 +735,7 @@ local function Steps(g)
 				local any, done = {}, false
 				for _, other in ipairs(prev) do
 					local q = Call("Quest", other)
-					if type(q) == "table" and q.name then any[#any + 1] = q.name end
+					if type(q) == "table" and q.name and not OtherSide(q) then any[#any + 1] = q.name end
 					if Mine("QuestDone", other) == true then done = true end
 				end
 				if #any > 0 then add("Quest: " .. table.concat(any, " or "), done or nil) end
@@ -756,16 +754,20 @@ local function Steps(g)
 			add("Get " .. (s.starterName or NameOf(s.starter)) .. ": it starts the quest")
 		end
 		local from = s.giver and (" from " .. s.giver .. (Where(s) and (", " .. Where(s)) or "")) or ""
-		add("Take the quest " .. (s.name or "") .. from)
+		add("Take the quest " .. (s.name or "") .. from, Mine("OnQuest", s.quest) == true or nil)
 		if s.needs and s.needs ~= s.inst then add("Go through " .. s.needs) end
 		add(s.turnIn and ("Turn it in to " .. s.turnIn .. (s.turnInAt and (", " .. s.turnInAt) or "")) or "Finish it")
 	elseif s.kind == "craft" then
 		if Mine("Knows", s.spell) == true then
 			add("Learn the recipe", true)
-		elseif s.recipe and not waiting[s.recipe] then
-			add("Get " .. NameOf(s.recipe) .. " and learn it")
 		else
-			add("Learn the recipe")
+			-- asked first: a name the game has not sent yet sets waiting
+			local name = s.recipe and NameOf(s.recipe)
+			if name and not waiting[s.recipe] then
+				add("Get " .. name .. " and learn it")
+			else
+				add("Learn the recipe")
+			end
 		end
 		local rank = s.prof and Mine("Skill", s.prof, s.profId)
 		if s.skill then
@@ -821,16 +823,28 @@ local function Details(g)
 	return nil
 end
 
+-- The step to do now: the first one not done. A step the game cannot answer for (done is nil) is
+-- passed when a later step is known to be done.
+function U.NextStep(steps)
+	local last = 0
+	for i, step in ipairs(steps) do
+		if step.done == true then last = i end
+	end
+	for i, step in ipairs(steps) do
+		if step.done == false or (step.done == nil and i > last) then return i end
+	end
+	return nil
+end
+
 -- A plan as one line: "Next step, 2 of 5: Quest: Murky Trouble". All steps are in its tooltip, and
 -- a click opens them in the side panel (a quest's with the rest about the quest).
 -- Returns its height; 0 when the source is one act.
 local function StepsLine(row, g, x, y, width)
 	local steps = Steps(g)
 	if #steps < MIN_STEPS then return 0 end
-	local tip, next = {}, nil
+	local tip, next = {}, U.NextStep(steps)
 	for i, step in ipairs(steps) do
 		tip[i] = i .. ". " .. step.text .. (step.done == true and UI.Colored(" (done)", C.GREEN) or "")
-		if not next and step.done ~= true then next = i end
 	end
 	local text = next and (Gold(("Next step, %d of %d:"):format(next, #steps)) .. " " .. steps[next].text)
 		or UI.Colored("All " .. #steps .. " steps done", C.GREEN)
@@ -1227,7 +1241,7 @@ local function FillRow(row, entry, y, level)
 	local name = UI.Colored(ItemName(entry), entry.quality and UI.QUALITY[entry.quality] or C.TEXT)
 	local own = Call("Item", entry.id)
 	if entry.req and level and entry.req > level and not (own and own.reach) then
-		name = name .. "  " .. UI.Colored("Lvl " .. entry.req, C.RED)
+		name = name .. "  " .. UI.Colored("Level " .. entry.req, C.RED)
 	end
 	row.name:SetText(name)
 	row.source:SetText(entry.source and RowSource(entry) or UI.Colored("Source: unknown", C.FAINT))
@@ -1406,7 +1420,7 @@ local function SlotRow(parent, i, key, label)
 	row:SetScript("OnEnter", function(self)
 		self.over:Show()
 		if self.key and self.better and self.better > 0 then
-			UI.TextTooltip(self, label, { "Better items: " .. self.better })
+			UI.TextTooltip(self, label, { "Better items: " .. self.better .. (self.better >= (ns.db.huntsPerSlot or 5) and " or more" or "") })
 		end
 	end)
 	row:SetScript("OnLeave", function(self)

@@ -274,12 +274,22 @@ end
 
 -- Loot history ----------------------------------------------------------------------------
 
+-- Another open roll for the same item. Its drop cannot be told apart by the item, so a choice
+-- read from a drop may belong to the twin.
+local function HasTwin(r)
+	if not r.link then return false end
+	for _, o in ipairs(list) do
+		if o ~= r and not o.fake and not o.done and o.link and SameItem(o.link, r.link) then return true end
+	end
+	return false
+end
+
 local function Link(r, rec)
 	rec.roll, r.rec, r.info = r, rec, rec.info
 	rec.info = nil
 	open[rec.id] = nil
 	-- my choice, when the game already knows it
-	if not r.mine and not r.confirming then r.mine = ChoiceOf(r.info.playerRollState) end
+	if not r.mine and not r.confirming and not HasTwin(r) then r.mine = ChoiceOf(r.info.playerRollState) end
 end
 
 -- Can this history drop be the item of this roll?
@@ -303,14 +313,14 @@ local function StoreDrop(eid, info)
 	local id = tostring(eid) .. ":" .. tostring(key)
 	local rec = drops[id]
 	if not rec then
-		rec = { id = id }
+		rec = { id = id, eid = tonumber(eid) or 0, key = tonumber(key) or 0 }
 		drops[id] = rec
 	end
 	if rec.old then return end
 	if rec.roll then
 		local r = rec.roll
 		r.info = info
-		if not r.mine and not r.confirming then r.mine = ChoiceOf(info.playerRollState) end
+		if not r.mine and not r.confirming and not HasTwin(r) then r.mine = ChoiceOf(info.playerRollState) end
 		return true
 	end
 	rec.info = info
@@ -332,11 +342,22 @@ end
 -- Pairs a roll with a drop we already hold.
 local function FindDrop(r)
 	if r.rec or r.fake or not r.link then return end
-	local best
+	local found = {}
 	for _, rec in pairs(open) do
-		if rec.info and Fits(r, rec.info) and (not best or rec.id < best.id) then best = rec end
+		if rec.info and Fits(r, rec.info) then found[#found + 1] = rec end
 	end
-	if best then Link(r, best) end
+	if #found == 0 then return end
+	table.sort(found, function(a, b)
+		if a.eid ~= b.eid then return a.eid < b.eid end
+		return a.key < b.key
+	end)
+	-- twins in order: the oldest roll takes the lowest key, the next roll the next one
+	local n = 1
+	for _, o in ipairs(list) do
+		if o == r then break end
+		if not o.rec and not o.fake and (not o.link or SameItem(o.link, r.link)) then n = n + 1 end
+	end
+	Link(r, found[math.min(n, #found)])
 end
 
 local function ReadDrop(eid, key)
@@ -1061,6 +1082,11 @@ local function Sweep(now)
 				changed = true
 			end
 		end
+		-- the winner event may not come for every roll that ends together: read its drop again
+		if r.closed and r.rec and not r.done and not r.fake and now >= (r.reread or 0) then
+			r.reread = now + 1
+			if ReadDrop(r.rec.eid, r.rec.key) then changed = true end
+		end
 		if not r.done then
 			local over = now >= r.started + r.duration
 			if IsDone(r.info) then
@@ -1138,13 +1164,7 @@ end
 
 local quiet -- patterns of roll lines; nil until first needed
 
--- Game text with %s and %d -> a pattern that matches the finished line.
-local function ToPattern(text)
-	text = text:gsub("%%%d+%$", "%%")
-	text = text:gsub("[%^%$%(%)%.%[%]%*%+%-%?]", "%%%0")
-	text = text:gsub("%%s", ".+"):gsub("%%d", "%%d+")
-	return "^" .. text .. "$"
-end
+local ToPattern = ns.ToPattern
 
 local QUIET_KEYS = { "NEED", "GREED", "PASSED", "PASSED_AUTO", "PASSED_AUTO_FEMALE", "NEED_SELF", "GREED_SELF", "PASSED_SELF",
 	"PASSED_SELF_AUTO", "ROLLED_NEED", "ROLLED_GREED", "ROLLED_NEED_ROLE_BONUS", "DISENCHANT", "DISENCHANT_SELF", "ROLLED_DE",
@@ -1152,7 +1172,7 @@ local QUIET_KEYS = { "NEED", "GREED", "PASSED", "PASSED_AUTO", "PASSED_AUTO_FEMA
 
 local function QuietFilter(_, _, message)
 	-- the window shows these lines; with the window off they are the only place that does
-	if not (LM.db and LM.db.rollQuietChat and LM.db.rollWindow) then return false end
+	if not (LM.db and LM.db.rollQuietChat and Active() and window and window:IsShown()) then return false end
 	message = Plain(message)
 	if type(message) ~= "string" then return false end
 	for i = 1, #quiet do

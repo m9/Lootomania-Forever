@@ -4,7 +4,6 @@ local ADDON, ns = ...
 -- This file holds what every other file leans on: saved settings, game events, messages
 -- between modules, slash commands and chat output.
 
-ns.NAME = "Lootomania"
 ns.ICON = "Interface\\Icons\\INV_Misc_Bag_10_Green"
 ns.VERSION = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetadata(ADDON, "Version")) or "dev"
 
@@ -12,7 +11,7 @@ ns.VERSION = (C_AddOns and C_AddOns.GetAddOnMetadata and C_AddOns.GetAddOnMetada
 
 -- Modules add their own defaults with ns.Defaults before login.
 local accountDefaults = {
-	minimap = { hide = false, angle = 215 },
+	minimap = { angle = 215 },
 	windows = {}, -- saved window places, by window name
 }
 local charDefaults = {}
@@ -102,6 +101,11 @@ end)
 --   "HUNTS_CHANGED"     tracked, completed or removed upgrades changed
 --   "SETTINGS_CHANGED"  key: a setting changed
 --   "HISTORY_CHANGED"   loot history got a new run, drop or roll
+--   "FILTERS_CHANGED"   a filter of the Upgrades tab changed
+--   "GUIDE_CHANGED"     target: the guide arrow points somewhere new, or nowhere
+--   "LOOT_DROPPED"      link, boss: a tracked or wanted item dropped
+--   "LOOT_DECIDED"      drop, run: the roll for a drop is decided
+--   "LUCK_CHANGED"      the luck figures changed
 
 local listeners = {}
 
@@ -119,9 +123,7 @@ function ns.Send(message, ...)
 	end
 end
 
--- Settings: one way to read and change them, so the UI can refresh.
-function ns.Get(key) return ns.db[key] end
-
+-- Settings: one way to change them, so the UI can refresh.
 function ns.Set(key, value)
 	if ns.db[key] == value then return end
 	ns.db[key] = value
@@ -228,6 +230,22 @@ function ns.SuffixID(link)
 	return nil
 end
 
+-- A drop chance as text: "13%", "5%", "6.5%", "<0.1%". One wording in every file.
+function ns.ChanceText(chance)
+	if type(chance) ~= "number" then return nil end
+	if chance >= 10 then return ("%d%%"):format(math.floor(chance + 0.5)) end
+	if chance < 0.1 then return "<0.1%" end
+	return (("%.1f"):format(chance):gsub("%.0$", "")) .. "%"
+end
+
+-- A game text with %s and %d (a loot or roll line) as a pattern that matches the finished line.
+function ns.ToPattern(text)
+	text = text:gsub("%%%d+%$", "%%")
+	text = text:gsub("[%^%$%(%)%.%[%]%*%+%-%?]", "%%%0")
+	text = text:gsub("%%s", ".+"):gsub("%%d", "%%d+")
+	return "^" .. text .. "$"
+end
+
 -- NPC ID from a unit GUID.
 function ns.NpcID(guid)
 	guid = ns.Plain(guid)
@@ -237,7 +255,7 @@ function ns.NpcID(guid)
 	return nil
 end
 
--- Runs fn after the game has stopped calling it for `delay` seconds.
+-- Runs fn `delay` seconds after the first call. Calls in between are dropped.
 function ns.Debounce(delay, fn)
 	local pending = false
 	return function()
@@ -250,9 +268,3 @@ function ns.Debounce(delay, fn)
 	end
 end
 
--- Loads one of our load-on-demand data addons. True when it is loaded.
-function ns.LoadData(name)
-	if C_AddOns.IsAddOnLoaded(name) then return true end
-	local ok, loadedNow = pcall(C_AddOns.LoadAddOn, name)
-	return ok and loadedNow and true or false
-end

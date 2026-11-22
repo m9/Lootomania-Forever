@@ -250,7 +250,9 @@ local function Build(link, short)
 				-- what it is called and who makes it: "Enchant Bracer - Minor Stamina, Enchanting 80"
 				local how = {}
 				if enchant.name and enchant.name ~= text then how[1] = enchant.name end
-				if enchant.prof then how[#how + 1] = enchant.prof .. (enchant.skill and (" " .. enchant.skill) or "") end
+				if enchant.prof then
+					how[#how + 1] = enchant.prof .. (enchant.skill and (" " .. enchant.skill) or enchant.skillMax and (" (" .. enchant.skillMax .. " or less)") or "")
+				end
 				if #how > 0 then block[2] = { UI.Colored("  " .. table.concat(how, ", "), C.MUTED), small = true } end
 			end
 			blocks[#blocks + 1] = block
@@ -268,8 +270,11 @@ local function Build(link, short)
 		if source then
 			last[#last + 1] = { Label("Source") .. source }
 		elseif Gear.Item and Gear.Item(id) then
-			-- an item of the lists with no source in the data: said, so it does not read as a setting that is off
-			last[#last + 1] = { Label("Source") .. UI.Colored("unknown", C.FAINT) }
+			-- an item of the lists with no source in the data: said, so it does not read as a setting that is off.
+			-- A quest that is done says so.
+			local text = Gear.SourceSummary and Gear.SourceSummary(id)
+			if type(text) ~= "string" or not text:find("^Quest done") then text = "unknown" end
+			last[#last + 1] = { Label("Source") .. UI.Colored(text, C.FAINT) }
 		end
 		-- a vendor whose price or requirements we have not confirmed: say so in small print
 		if source and Gear.SourceUnsure and Gear.SourceUnsure(id) then
@@ -488,9 +493,9 @@ if TooltipDataProcessor and TooltipDataProcessor.AddTooltipPostCall and Enum and
 	-- Line hook, for the suffix lines. Without it they stay in our block at the bottom.
 	if TooltipDataProcessor.AddLinePreCall then
 		local kinds = Enum.TooltipDataLineType
-		for _, kind in ipairs({ TooltipDataProcessor.AllTypes or false, kinds and kinds.RestrictedLevel or false }) do
-			if kind and pcall(TooltipDataProcessor.AddLinePreCall, kind, Tip.BeforeLine) then Tip.lineHook = true end
-		end
+		-- the game calls the list of every line and the list of the line's own type: one is enough
+		local kind = TooltipDataProcessor.AllTypes or (kinds and kinds.RestrictedLevel)
+		if kind and pcall(TooltipDataProcessor.AddLinePreCall, kind, Tip.BeforeLine) then Tip.lineHook = true end
 	end
 else
 	ns.OnLoad(function()
