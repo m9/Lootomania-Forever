@@ -8,7 +8,7 @@ local ADDON, ns = ...
 --   core      On, Listen, OnLoad, Command, Print, Debug, Safe, Plain, ItemID, Debounce, db, player
 --   widgets   UI
 --   settings  Main.AddOption (keys start with "roll"); the window's place is db.windows.Rolls
---   optional  Gear.Compare, Gear.IsTracked, Wish.Has: hints and marks, left out when missing
+--   optional  Gear.Compare, Gear.OtherGains, Gear.PlayerContext, Gear.IsTracked: hints and the tracked mark, left out when missing
 -- Today LM is the shared addon table. As a separate addon it would be a table the main addon exports.
 -- Bindings.xml in the addon root belongs here too; the game only reads it from the root.
 local LM = ns
@@ -24,18 +24,22 @@ LM.Rolls = Rolls
 
 local GROUP = "Roll window"
 -- Off until the player turns it on: it takes rolls away from Blizzard's frames.
-LM.Main.AddOption({ group = GROUP, key = "rollWindow", kind = "check", label = "Enabled", default = false,
-	tip = "Off: Blizzard roll frames." })
+LM.Main.AddOption({ group = GROUP, key = "rollWindow", kind = "check", label = "Use for group rolls", default = false,
+	tip = "Off: rolls come up in the game's own frames.\nKeys for Need, Greed and Pass: the game's key bindings, under Lootomania." })
+
+-- Said wherever the window is shown while it is off: sample rolls work, real ones do not come here.
+local OFF_TEXT = "Off: rolls use the game's frames.\nSettings, Roll window: Use for group rolls."
 LM.Main.AddOption({ group = GROUP, key = "rollLock", kind = "check", label = "Lock window", default = false })
 LM.Main.AddOption({ group = GROUP, key = "rollHidePassed", kind = "check", label = "Hide passed items", default = false })
 LM.Main.AddOption({ group = GROUP, key = "rollSoundStart", kind = "check", label = "Sound: roll start", default = false })
 LM.Main.AddOption({ group = GROUP, key = "rollSoundWarn", kind = "check", label = "Sound: 5 s left", default = false })
-LM.Main.AddOption({ group = GROUP, key = "rollQuietChat", kind = "check", label = "Hide roll chat lines", default = false })
+LM.Main.AddOption({ group = GROUP, key = "rollQuietChat", kind = "check", label = "Hide roll chat lines", default = false,
+	tip = "Who rolled what, while the roll window shows it. Nothing is hidden while the window is off." })
 LM.Main.AddOption({ group = GROUP, key = "rollScale", kind = "slider", label = "Scale", min = 60, max = 160, step = 5,
 	format = "%d%%", default = 100 })
 LM.Main.AddOption({ group = GROUP, key = "rollAlpha", kind = "slider", label = "Opacity", min = 30, max = 100, step = 5,
 	format = "%d%%", default = 100 })
-LM.Main.AddOption({ group = GROUP, key = "rollLinger", kind = "slider", label = "Show winner", min = 0, max = 60, step = 5,
+LM.Main.AddOption({ group = GROUP, key = "rollLinger", kind = "slider", label = "Show the winner for", min = 0, max = 60, step = 5,
 	format = "%d s", default = 15 })
 
 -- Choices -----------------------------------------------------------------------------
@@ -187,8 +191,9 @@ local function ItemLevel(link)
 	return type(base) == "number" and base or nil
 end
 
--- Item level against the weaker worn item. Returns hint, or nil with true when the item
--- is not loaded yet.
+-- An item the data does not know: its item level against the weaker worn item. It is not known
+-- whether the class can wear it or wants its stats, so the hint is grey and says "not rated";
+-- green would read as "roll Need". Returns hint, or nil with true when the item is not loaded yet.
 local function LevelHint(link)
 	local ok, name, _, _, _, _, _, _, _, equipLoc = pcall(C_Item.GetItemInfo, link)
 	if not ok then return nil end
@@ -203,9 +208,7 @@ local function LevelHint(link)
 		local level = wornLink and ItemLevel(wornLink) or 0
 		if not worn or level < worn then worn = level end
 	end
-	local delta = new - (worn or 0)
-	if delta > 0 then return { text = "+" .. delta .. " ilvl", color = C.GREEN } end
-	return { text = "No upgrade", color = C.FAINT }
+	return { text = ("Not rated, %+d ilvl"):format(new - (worn or 0)), color = C.MUTED }
 end
 
 -- Hint for a roll: { text, color }, or false when there is nothing to say.
@@ -216,11 +219,19 @@ local function Hint(r)
 	local compare = LM.Gear and LM.Gear.Compare
 	local known = false
 	if compare then
-		local ok, result = pcall(compare, r.link)
+		-- the player's own gear, also while the Simulator previews another character
+		local player = LM.Gear.PlayerContext and LM.Gear.PlayerContext()
+		local ok, result = pcall(compare, r.link, player)
 		if ok and result == nil then
 			known, hint = true, false -- not gear
 		elseif ok and type(result) == "table" then
-			if result.usable == false then
+			if result.usable == false and result.reason == "level" and result.atLevel then
+				-- it only waits for a level: say which, and what it will be worth
+				known = true
+				local gain = type(result.delta) == "number" and result.delta > 0 and result.gain
+				local worth = type(gain) == "number" and (": +%d"):format(math.max(1, math.floor(gain + 0.5))) or ""
+				hint = { text = ("At level %d%s"):format(result.atLevel, worth), color = worth ~= "" and C.GOLD or C.FAINT }
+			elseif result.usable == false then
 				known, hint = true, { text = "Can't use", color = C.RED }
 			elseif result.known ~= false and type(result.delta) == "number" then
 				known = true
@@ -230,7 +241,17 @@ local function Hint(r)
 					if result.rank then text = text .. ", rank " .. result.rank end
 					hint = { text = text, color = C.GREEN }
 				else
-					hint = { text = "No upgrade", color = C.FAINT }
+					-- nothing for the spec in use: another spec of the character may want it
+					local best
+					if LM.Gear.OtherGains then
+						local ok3, list = pcall(LM.Gear.OtherGains, r.link, player)
+						best = ok3 and type(list) == "table" and list[1] or nil
+					end
+					if best and type(best.gain) == "number" then
+						hint = { text = ("%s: +%d"):format(best.label, math.max(1, math.floor(best.gain + 0.5))), color = C.GOLD }
+					else
+						hint = { text = "No upgrade", color = C.FAINT }
+					end
 				end
 			end
 		end
@@ -244,10 +265,10 @@ local function Hint(r)
 	return hint
 end
 
-local function Flag(module, method, itemID)
+local function Flag(module, method, itemID, ...)
 	local fn = itemID and LM[module] and LM[module][method]
 	if not fn then return false end
-	local ok, result = pcall(fn, itemID)
+	local ok, result = pcall(fn, itemID, ...)
 	return ok and result and true or false
 end
 
@@ -366,10 +387,30 @@ local function Remove(r)
 	end
 end
 
+local NUM_BLIZZARD = 4 -- GroupLootFrame1..4
+
+-- Blizzard's roll frame that holds a roll, if one does (it has four; more rolls wait for a free one).
+local function BlizzardFrame(id)
+	for i = 1, NUM_BLIZZARD do
+		local frame = _G["GroupLootFrame" .. i]
+		if frame and frame:IsShown() and Plain(frame.rollID) == id then return frame end
+	end
+	return nil
+end
+
+-- The roll can no longer be chosen. Blizzard closes the bind dialog with its roll frame; a roll that
+-- never got one of its frames would leave the dialog open, and OK would then confirm a roll that is over.
+local function Close(r, now)
+	if r.confirming and not r.fake and not BlizzardFrame(r.id) and StaticPopup_Hide then
+		pcall(StaticPopup_Hide, "CONFIRM_LOOT_ROLL", r.id)
+	end
+	r.closed, r.closedAt, r.confirming = true, r.closedAt or now, nil
+end
+
 local function Finish(r)
 	if r.done then return end
-	r.done, r.closed, r.confirming = true, true, nil
-	r.doneAt = Now()
+	Close(r, Now())
+	r.done, r.doneAt = true, Now()
 end
 
 local function Insert(r)
@@ -422,46 +463,62 @@ local function LoadActive()
 		end
 	end
 	for _, r in ipairs(list) do
-		if not r.fake and not live[r.id] and not r.closed then
-			r.closed, r.closedAt = true, Now()
-		end
+		if not r.fake and not live[r.id] and not r.closed then Close(r, Now()) end
 	end
 	if added and Unpaired() then ReadAll() end
 end
 
 -- Blizzard's roll frames ---------------------------------------------------------------------
+-- On this client START_LOOT_ROLL goes to a private frame of Blizzard's (Blizzard_Game EventRouting), so its
+-- roll frames cannot be switched off. They keep running, and a frame whose roll our window shows is made
+-- invisible and click-through (alpha 0, mouse off). Blizzard still opens, places and closes its frames,
+-- frees their slots in GroupLootContainer and closes the bind dialog with them. The frames are not
+-- protected, so this works in combat too. A roll our window does not show (past the last row, window
+-- closed, setting off, our code failed to list it) keeps Blizzard's frame, unless it is already answered.
 
-local taken = false
+local onScreen = {} -- roll ID -> true while a row of the window shows it
+local cloaked = {} -- Blizzard frame -> { [part] = mouse was on } while it is invisible
 
--- Blizzard frames that showed anyway go away again. Out of combat only.
-local function HideBlizzard()
-	if not taken or (InCombatLockdown and InCombatLockdown()) then return end
-	for i = 1, 20 do
-		local frame = _G["GroupLootFrame" .. i]
-		if not frame then break end
-		local id = Plain(frame.rollID)
-		if frame:IsShown() and id and rolls[id] then pcall(frame.Hide, frame) end
+-- The parts of a Blizzard roll frame that take the mouse.
+local function Parts(frame)
+	local parts = { frame }
+	if frame.IconFrame then parts[#parts + 1] = frame.IconFrame end
+	local box = frame.LootButtonContainer
+	for _, button in ipairs(box and box.LootButtons or {}) do parts[#parts + 1] = button end
+	return parts
+end
+
+local function Cloak(frame, on)
+	if on == (cloaked[frame] ~= nil) then return end
+	if on then
+		local saved = {}
+		for _, part in ipairs(Parts(frame)) do
+			saved[part] = part:IsMouseEnabled() and true or false
+			part:EnableMouse(false)
+		end
+		cloaked[frame] = saved
+		frame:SetAlpha(0)
+	else
+		local saved = cloaked[frame]
+		cloaked[frame] = nil
+		for part, mouse in pairs(saved) do part:EnableMouse(mouse) end
+		frame:SetAlpha(1)
 	end
 end
 
--- on: our window handles rolls. off: Blizzard's frames do.
-local function Takeover(on)
-	on = on and true or false
-	if on == taken then return end
-	taken = on
-	if not UIParent then return end
-	if on then
-		pcall(UIParent.UnregisterEvent, UIParent, "START_LOOT_ROLL")
-		return
-	end
-	pcall(UIParent.RegisterEvent, UIParent, "START_LOOT_ROLL")
-	-- hand open rolls back
-	local openFrame = _G.GroupLootFrame_OpenNewFrame
-	if type(openFrame) ~= "function" or (InCombatLockdown and InCombatLockdown()) then return end
-	for _, r in ipairs(list) do
-		if not r.fake and not r.closed and not r.mine then
-			local left = TimeLeft(r)
-			pcall(openFrame, r.id, r.inMs and left * 1000 or left)
+-- Blizzard's frame for a roll is invisible while our row shows the roll, or once I have chosen.
+local function Ours(id)
+	local r = id and rolls[id]
+	if not r or r.fake then return false end
+	return onScreen[id] == true or (r.mine ~= nil and not r.confirming)
+end
+
+local function UpdateBlizzard()
+	local on = Active()
+	for i = 1, NUM_BLIZZARD do
+		local frame = _G["GroupLootFrame" .. i]
+		if frame then
+			Cloak(frame, on and frame:IsShown() and Ours(Plain(frame.rollID)) or false)
 		end
 	end
 end
@@ -469,19 +526,19 @@ end
 local function GiveUp(why)
 	if gaveUp then return end
 	gaveUp = true
-	Takeover(false)
 	for i = #list, 1, -1 do
 		if not list[i].fake then Remove(list[i]) end
 	end
-	LM.Print("Rolls: blocked. Blizzard frames until reload.")
+	Draw() -- Blizzard's frames come back
+	LM.Print("Roll window: blocked by the game. Rolls use the game's frames until the interface is loaded again.")
 	LM.Debug(why)
 end
 
 -- Test rolls -----------------------------------------------------------------------------
 
 local FAKE_ITEMS = {
-	{ id = 18805, name = "Core Hound Tooth", quality = 4, wish = true, hint = { text = "+12%, rank 3", color = C.GREEN } },
-	{ id = 12940, name = "Dal'Rend's Sacred Charge", quality = 3, tracked = true, hint = { text = "No upgrade", color = C.FAINT } },
+	{ id = 18805, name = "Core Hound Tooth", quality = 4, tracked = true, hint = { text = "Upgrade +12, rank 3", color = C.GREEN } },
+	{ id = 12940, name = "Dal'Rend's Sacred Charge", quality = 3, hint = { text = "No upgrade", color = C.FAINT } },
 	{ id = 16866, name = "Helm of Might", quality = 4, bop = true, canNeed = false, whyNeed = "Not allowed",
 		hint = { text = "Can't use", color = C.RED } },
 }
@@ -529,6 +586,9 @@ function Rolls.Test()
 	for i = #list, 1, -1 do
 		if list[i].fake then Remove(list[i]) end
 	end
+	if not (LM.db and LM.db.rollWindow) then
+		LM.Print("Roll window: off. These are samples. To use it for real rolls: Settings, Roll window, Use for group rolls.")
+	end
 	local me = LM.player or {}
 	for n, item in ipairs(FAKE_ITEMS) do
 		nextFake = nextFake - 1
@@ -537,7 +597,7 @@ function Rolls.Test()
 			id = nextFake, fake = true, started = Now(), duration = 30, read = true,
 			itemID = item.id, name = item.name, quality = item.quality, count = 1, bop = item.bop,
 			link = ("%s|Hitem:%d::::::::60:::::::::|h[%s]|h|r"):format(color, item.id, item.name),
-			canNeed = item.canNeed, whyNeed = item.whyNeed, hint = item.hint, wish = item.wish, tracked = item.tracked,
+			canNeed = item.canNeed, whyNeed = item.whyNeed, hint = item.hint, tracked = item.tracked,
 			info = { rollInfos = {}, allPassed = false },
 		}
 		r.info.itemHyperlink = r.link
@@ -596,16 +656,25 @@ function Rolls.Choose(r, choice)
 	return true
 end
 
+-- Rows in order: rolls that still wait for my choice first, then the answered and ended ones, each
+-- group oldest first. "More: N" then holds rows with nothing left to do, not rolls I could still win.
 local function Visible()
-	local out = {}
+	local out, rest = {}, {}
 	for _, r in ipairs(list) do
-		if not r.hidden then out[#out + 1] = r end
+		if not r.hidden then
+			local into = CanChoose(r) and out or rest
+			into[#into + 1] = r
+		end
 	end
+	for _, r in ipairs(rest) do out[#out + 1] = r end
 	return out
 end
 
--- Key bindings: the first item still waiting for a choice.
+-- Key bindings: the first item still waiting for a choice. It is the top row of the window
+-- (Visible), so the keys do nothing while the window is not shown: a key must not roll on an
+-- item the player does not see.
 function Rolls.Key(choice)
+	if not (window and window:IsShown()) then return false end
 	for _, r in ipairs(list) do
 		if not r.hidden and CanChoose(r) then return Rolls.Choose(r, choice) end
 	end
@@ -627,8 +696,7 @@ local ROW_WIDTH = WIDTH - 24
 local MAX_ROWS = 8
 local GAP = 4
 local BUTTON_W, BUTTON_H = 52, 20
-local STAR = "Interface\\TargetingFrame\\UI-RaidTargetingIcon_1"
-local DIAMOND = "Interface\\TargetingFrame\\UI-RaidTargetingIcon_3"
+local STAR = "Interface\\TargetingFrame\\UI-RaidTargetingIcon_1" -- the Track button of the Upgrades tab
 
 local function PlayerName(p)
 	local name = Plain(p.playerName)
@@ -701,28 +769,38 @@ local function MakeRow()
 
 	row.icon = UI.Icon(row, 36)
 	row.icon:SetPoint("TOPLEFT", 6, -6)
-	row.icon:SetScript("OnEnter", function(self)
+	-- The item's tooltip, with what it replaces and the stat changes. owner: what it hangs on.
+	local function ShowTip(owner)
 		local r = row.roll
 		if not r then return end
 		-- the roll's own tooltip shows the exact item (random suffix)
 		if not r.fake and not r.closed and GameTooltip.SetLootRollItem then
-			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+			GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
 			if pcall(GameTooltip.SetLootRollItem, GameTooltip, r.id) then
 				GameTooltip:Show()
 				return
 			end
 		end
-		if self.item then UI.ItemTooltip(self, self.item) end
-	end)
+		if row.icon.item then UI.ItemTooltip(owner, row.icon.item) end
+	end
+	row.icon:SetScript("OnEnter", function(self) ShowTip(self) end)
+	-- The name and the hint show it too: "Upgrade +86" alone does not say what comes off. Clicks
+	-- pass through, so the window still drags from there.
+	local over = CreateFrame("Frame", nil, row)
+	over:SetPoint("TOPLEFT", 46, -4)
+	over:SetSize(148, 38)
+	if over.SetMouseClickEnabled and over.SetMouseMotionEnabled then
+		over:SetMouseMotionEnabled(true)
+		over:SetMouseClickEnabled(false)
+		over:SetScript("OnEnter", function() ShowTip(row.icon) end)
+		over:SetScript("OnLeave", UI.HideTooltip)
+	end
 	row.count = UI.Text(row.icon, "GameFontHighlightSmall", C.TEXT)
 	row.count:SetPoint("BOTTOMRIGHT", -2, 2)
 
 	row.star = row:CreateTexture(nil, "OVERLAY")
 	row.star:SetSize(14, 14)
 	row.star:SetTexture(STAR)
-	row.mark = row:CreateTexture(nil, "OVERLAY")
-	row.mark:SetSize(14, 14)
-	row.mark:SetTexture(DIAMOND)
 
 	row.name = UI.Text(row, "GameFontHighlight", C.TEXT)
 	row.time = UI.Text(row, "GameFontHighlightSmall", C.MUTED)
@@ -774,9 +852,15 @@ local function Build()
 	pool = UI.Pool(MakeRow)
 	emptyText = UI.Text(window.body, "GameFontHighlightSmall", C.FAINT)
 	emptyText:SetPoint("TOPLEFT", 2, -4)
+	emptyText:SetWidth(WIDTH - 24)
 	emptyText:SetText("No rolls")
 	moreText = UI.Text(window.body, "GameFontHighlightSmall", C.MUTED)
-	window:HookScript("OnHide", function() pinned = false end)
+	window:HookScript("OnHide", function()
+		pinned = false
+		-- rolls I have not answered go back to Blizzard's frames
+		wipe(onScreen)
+		UpdateBlizzard()
+	end)
 	Apply()
 end
 
@@ -803,10 +887,11 @@ end
 
 local function DrawRow(row, r)
 	row.roll = r
-	local wish = r.wish or Flag("Wish", "Has", r.itemID)
-	local tracked = r.tracked or Flag("Gear", "IsTracked", r.itemID)
+	-- a tracked item: gold row and the star. Tracked with a suffix: only that suffix.
+	local suffix = r.link and LM.Gear and LM.Gear.LinkSuffixID and LM.Gear.LinkSuffixID(r.link) or nil
+	local tracked = r.tracked or Flag("Gear", "IsTracked", r.itemID, suffix)
 
-	local fill, edge = wish and C.PANEL_HI or C.PANEL, wish and C.GOLD or C.LINE
+	local fill, edge = tracked and C.PANEL_HI or C.PANEL, tracked and C.GOLD or C.LINE
 	row:SetBackdropColor(fill[1], fill[2], fill[3], 0.92)
 	row:SetBackdropBorderColor(edge[1], edge[2], edge[3], 1)
 
@@ -814,18 +899,12 @@ local function DrawRow(row, r)
 	if r.texture then row.icon.icon:SetTexture(r.texture) end
 	row.count:SetText(type(r.count) == "number" and r.count > 1 and r.count or "")
 
-	-- marks, then the name
+	-- mark, then the name
 	local x = 48
-	row.star:SetShown(wish)
-	if wish then
+	row.star:SetShown(tracked)
+	if tracked then
 		row.star:ClearAllPoints()
 		row.star:SetPoint("TOPLEFT", x, -7)
-		x = x + 17
-	end
-	row.mark:SetShown(tracked)
-	if tracked then
-		row.mark:ClearAllPoints()
-		row.mark:SetPoint("TOPLEFT", x, -7)
 		x = x + 17
 	end
 	row.name:ClearAllPoints()
@@ -889,28 +968,36 @@ Draw = function()
 	if not LM.db then return end
 	local visible = Visible()
 	Sync(#visible)
-	if not window or not window:IsShown() then return end
-	local y = 0
-	local shown = math.min(#visible, MAX_ROWS)
-	for i = 1, shown do
-		local row = pool:Get(i)
-		row:ClearAllPoints()
-		row:SetPoint("TOPLEFT", 0, -y)
-		y = y + DrawRow(row, visible[i]) + GAP
+	wipe(onScreen)
+	if window and window:IsShown() then
+		local y = 0
+		local shown = math.min(#visible, MAX_ROWS)
+		for i = 1, shown do
+			local row = pool:Get(i)
+			row:ClearAllPoints()
+			row:SetPoint("TOPLEFT", 0, -y)
+			y = y + DrawRow(row, visible[i]) + GAP
+			onScreen[visible[i].id] = true
+		end
+		pool:HideFrom(shown + 1)
+		for i = shown + 1, #pool.rows do pool.rows[i].roll = nil end
+		emptyText:SetShown(shown == 0)
+		if shown == 0 then
+			local on = LM.db and LM.db.rollWindow
+			emptyText:SetText(on and "No rolls" or OFF_TEXT)
+			y = on and 24 or 40
+		end
+		local more = #visible - shown
+		moreText:SetShown(more > 0)
+		if more > 0 then
+			moreText:ClearAllPoints()
+			moreText:SetPoint("TOPLEFT", 2, -y)
+			moreText:SetText("More: " .. more)
+			y = y + 18
+		end
+		SetHeight(46 + y + 8)
 	end
-	pool:HideFrom(shown + 1)
-	for i = shown + 1, #pool.rows do pool.rows[i].roll = nil end
-	emptyText:SetShown(shown == 0)
-	if shown == 0 then y = 24 end
-	local more = #visible - shown
-	moreText:SetShown(more > 0)
-	if more > 0 then
-		moreText:ClearAllPoints()
-		moreText:SetPoint("TOPLEFT", 2, -y)
-		moreText:SetText("More: " .. more)
-		y = y + 18
-	end
-	SetHeight(46 + y + 8)
+	UpdateBlizzard()
 end
 
 -- For bursts of events (a raid's loot history): one draw.
@@ -987,7 +1074,7 @@ local function Sweep(now)
 				Finish(r)
 				changed = true
 			elseif over and not r.closed then
-				r.closed, r.closedAt = true, now
+				Close(r, now)
 				changed = true
 			end
 		end
@@ -1016,9 +1103,10 @@ local function OnUpdate(_, elapsed)
 	if now >= sweepAt then
 		sweepAt = now + 0.25
 		if Sweep(now) then Draw() end
-		HideBlizzard()
+		UpdateBlizzard() -- Blizzard opens its frames on its own clock
 	end
-	for _, r in ipairs(list) do
+	-- the 5 seconds warning: asked of the game only when its sound is on
+	for _, r in ipairs(LM.db and LM.db.rollSoundWarn and list or {}) do
 		if not r.warned and not r.fake and CanChoose(r) and r.duration > 8 then
 			local left = TimeLeft(r)
 			if left <= 5 and left > 0 then
@@ -1063,7 +1151,8 @@ local QUIET_KEYS = { "NEED", "GREED", "PASSED", "PASSED_AUTO", "PASSED_AUTO_FEMA
 	"TRANSMOG", "TRANSMOG_SELF", "ROLLED_TRANSMOG" }
 
 local function QuietFilter(_, _, message)
-	if not (LM.db and LM.db.rollQuietChat) then return false end
+	-- the window shows these lines; with the window off they are the only place that does
+	if not (LM.db and LM.db.rollQuietChat and LM.db.rollWindow) then return false end
 	message = Plain(message)
 	if type(message) ~= "string" then return false end
 	for i = 1, #quiet do
@@ -1086,21 +1175,22 @@ Rolls.ToPattern = ToPattern
 
 -- Events -----------------------------------------------------------------------------------
 
-LM.On("START_LOOT_ROLL", function(_, id, duration)
+-- A roll starts. Blizzard's event frame and ours both get START_LOOT_ROLL, in no fixed order, and
+-- Blizzard's frame for it may open first: its OnShow hook lands here too.
+local function Start(id, duration)
 	if not Active() then return end
-	Takeover(true)
-	-- again, in case Blizzard's loot code registered after us
-	if UIParent then pcall(UIParent.UnregisterEvent, UIParent, "START_LOOT_ROLL") end
 	if AddRoll(id, duration) then
 		Sound("rollSoundStart", "TELL_MESSAGE", 3081)
 		Draw()
 	end
-end)
+end
+
+LM.On("START_LOOT_ROLL", function(_, id, duration) Start(id, duration) end)
 
 local function Cancel(id)
 	local r = rolls[id]
 	if not r or r.fake or r.closed then return end
-	r.closed, r.closedAt, r.confirming = true, Now(), nil
+	Close(r, Now())
 end
 
 LM.On("CANCEL_LOOT_ROLL", function(_, id)
@@ -1151,8 +1241,15 @@ LM.On("PLAYER_ENTERING_WORLD", function()
 	Draw()
 end)
 
+-- Item data arrives for every item any addon asks about, in bursts. It matters here only while a
+-- roll's hint waits for its item.
 LM.On("GET_ITEM_INFO_RECEIVED", function()
-	if #list > 0 then Queue() end
+	for _, r in ipairs(list) do
+		if r.hint == nil then
+			Queue()
+			return
+		end
+	end
 end)
 
 LM.On("ADDON_ACTION_BLOCKED", function(_, addon, what)
@@ -1171,16 +1268,14 @@ end
 LM.Listen("GEAR_CHANGED", ForgetHints)
 LM.Listen("CONTEXT_CHANGED", ForgetHints)
 LM.Listen("HUNTS_CHANGED", function() if #list > 0 then Queue() end end)
-LM.Listen("WISHLIST_CHANGED", function() if #list > 0 then Queue() end end)
 
 LM.Listen("SETTINGS_CHANGED", function(key)
 	if type(key) ~= "string" or key:sub(1, 4) ~= "roll" then return end
 	if key == "rollWindow" then
 		if LM.db.rollWindow then
-			Takeover(Active())
 			LoadActive()
 		else
-			Takeover(false)
+			-- Draw below gives the open rolls back to Blizzard's frames
 			for i = #list, 1, -1 do
 				if not list[i].fake then Remove(list[i]) end
 			end
@@ -1195,13 +1290,25 @@ LM.Listen("SETTINGS_CHANGED", function(key)
 end)
 
 LM.OnLoad(function()
-	Takeover(Active())
 	SetupQuiet()
+	for i = 1, NUM_BLIZZARD do
+		local frame = _G["GroupLootFrame" .. i]
+		if frame and frame.HookScript then
+			frame:HookScript("OnShow", function(self)
+				LM.Safe(function()
+					Start(Plain(self.rollID), Plain(self.rollTime))
+					UpdateBlizzard()
+				end)
+			end)
+			-- a reused frame starts out visible
+			frame:HookScript("OnHide", function(self) LM.Safe(Cloak, self, false) end)
+		end
+	end
 	-- accepting the game's bind dialog is when the roll really happens
 	if hooksecurefunc and ConfirmLootRoll then
 		hooksecurefunc("ConfirmLootRoll", function(id, kind)
 			local r = rolls[Plain(id) or false]
-			if not r then return end
+			if not r or r.closed then return end
 			r.confirming = nil
 			r.mine = KIND_CHOICE[Plain(kind) or false] or r.asked or "need"
 			if r.mine == "pass" and LM.db.rollHidePassed then r.hidden = true end

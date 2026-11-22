@@ -36,31 +36,54 @@ local driver
 
 -- Pin list ----------------------------------------------------------------------------
 
+local function AddSpot(spot, source, item, have)
+	if #list >= MAX_PINS then return false end
+	if not (type(spot) == "table" and spot.map and spot.x and spot.y) then return false end
+	local key = ("%s:%s:%.1f:%.1f"):format(tostring(item), spot.map, spot.x, spot.y)
+	if have[key] then return false end
+	have[key] = true
+	list[#list + 1] = { spot = spot, source = source, item = item }
+	return true
+end
+
 local function Add(source, item, max, have)
 	local spots = type(source) == "table" and source.spots
 	if type(spots) ~= "table" then return end
-	for i = 1, math.min(#spots, max) do
-		local spot = spots[i]
-		if #list >= MAX_PINS then return end
-		if type(spot) == "table" and spot.map and spot.x and spot.y then
-			local key = ("%s:%s:%.1f:%.1f"):format(tostring(item), spot.map, spot.x, spot.y)
-			if not have[key] then
-				have[key] = true
-				list[#list + 1] = { spot = spot, source = source, item = item }
+	for i = 1, math.min(#spots, max) do AddSpot(spots[i], source, item, have) end
+end
+
+-- A tracked item: up to MAX_TRACKED spots of all the places it can be had at, those of the open
+-- map first (a source's spots can be on several maps).
+local function AddTracked(ways, item, have, mapId)
+	local left = MAX_TRACKED
+	for pass = 1, 2 do
+		for _, way in ipairs(ways) do
+			local spots = type(way.source) == "table" and way.source.spots or {}
+			for i = 1, #spots do
+				if left <= 0 then return end
+				local spot = spots[i]
+				if type(spot) == "table" and (pass == 2 or spot.map == mapId) and AddSpot(spot, way.source, item, have) then
+					left = left - 1
+				end
 			end
 		end
 	end
 end
 
-local function BuildList()
+local function BuildList(mapId)
 	list = {}
 	local have = {}
 	if shown then Add(shown.source, shown.item, MAX_SHOWN, have) end
 	local Gear = ns.Gear
 	if ns.db and ns.db.pinsTracked and Gear and Gear.Tracked and Gear.Sources then
 		for _, id in ipairs(Gear.Tracked() or {}) do
-			local sources = Gear.Sources(id)
-			if sources and sources[1] then Add(sources[1], id, MAX_TRACKED, have) end
+			-- the sources with a place on the map: the recipe's or the box's when the item's own have none
+			local ways = Gear.Ways and Gear.Ways(id)
+			if not ways then
+				local way = Gear.WayTo and Gear.WayTo(id) or (Gear.Sources(id) or {})[1]
+				ways = way and { { source = way } } or {}
+			end
+			AddTracked(ways, id, have, mapId)
 		end
 	end
 end
@@ -117,7 +140,7 @@ end
 
 local function ItemName(id)
 	if ns.Gear and ns.Gear.Name then
-		local name, quality = ns.Gear.Name(id)
+		local name, quality = ns.Gear.Name(id, ns.Gear.PlayerContext()) -- the player's, not a Simulator preview
 		if name then return name, quality end
 	end
 	local item = ns.Gear and ns.Gear.Item and ns.Gear.Item(id)
@@ -129,7 +152,8 @@ end
 local function Tooltip(self)
 	local pin = self.pin
 	if not pin then return end
-	local source = pin.source
+	-- a source that stands for a group (13 creatures): the one this spot belongs to
+	local source = pin.source.spotOf and pin.source.spotOf[pin.spot] or pin.source
 	GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
 	if pin.item then
 		local name, quality = ItemName(pin.item)
@@ -140,10 +164,21 @@ local function Tooltip(self)
 	end
 	local text = source.text or source.name
 	if text then GameTooltip:AddLine(text, C.TEXT[1], C.TEXT[2], C.TEXT[3], true) end
+	-- the place of something in an instance is the way in
+	if source.inst and source.instMap then
+		GameTooltip:AddLine("Entrance: " .. source.inst, C.MUTED[1], C.MUTED[2], C.MUTED[3])
+	end
 	if source.chance then
 		GameTooltip:AddLine(("Chance: %s%%"):format(tostring(source.chance)), C.MUTED[1], C.MUTED[2], C.MUTED[3])
 	end
-	GameTooltip:AddLine(("Spot: %.1f, %.1f"):format(pin.spot.x, pin.spot.y), C.MUTED[1], C.MUTED[2], C.MUTED[3])
+	-- the other tracked items of this spot: their pins are under this one
+	for _, other in ipairs(self.more or {}) do
+		if other.item then
+			local name, quality = ItemName(other.item)
+			local c = UI.QUALITY[quality or 1] or C.TEXT
+			GameTooltip:AddLine("Also: " .. (name or "?"), c[1], c[2], c[3])
+		end
+	end
 	GameTooltip:AddLine("Click: guide", C.GOLD_SOFT[1], C.GOLD_SOFT[2], C.GOLD_SOFT[3])
 	GameTooltip:Show()
 end
@@ -151,8 +186,8 @@ end
 local function Click(self, button)
 	local pin = self.pin
 	if not pin or button ~= "LeftButton" or not ns.Guide then return end
-	local source = pin.source
-	ns.Guide.Set(pin.spot, source.name or source.text, pin.item)
+	local source = pin.source.spotOf and pin.source.spotOf[pin.spot] or pin.source
+	ns.Guide.Set(pin.spot, ns.Guide.Label and ns.Guide.Label(source) or source.name or source.text, pin.item)
 end
 
 local function NewPin(canvas)
@@ -192,7 +227,7 @@ end
 local function HideAll()
 	for i = 1, used do
 		frames[i]:Hide()
-		frames[i].pin = nil
+		frames[i].pin, frames[i].more = nil, nil
 	end
 	used = 0
 end
@@ -217,23 +252,32 @@ local function Place(map)
 	placedMap, placedScale, dirty = mapId, Scale(map), false
 	if not mapId or not canvas or Gamepad() then return end
 	if shown then shownSeen = true end
-	BuildList()
+	BuildList(mapId)
 	local others = TakesOthers(mapId)
+	local at = {} -- pins by place: one frame per spot, the rest are named in its tooltip
 	for i = 1, #list do
 		local pin = list[i]
 		local x, y
 		if pin.spot.map == mapId or others then x, y = Project(pin.spot, mapId) end
 		if x then
-			used = used + 1
-			local f = frames[used]
-			if not f then
-				f = NewPin(canvas)
-				frames[used] = f
+			local key = ("%.3f:%.3f"):format(x, y)
+			local f = at[key]
+			if f then
+				f.more = f.more or {}
+				f.more[#f.more + 1] = pin
+			else
+				used = used + 1
+				f = frames[used]
+				if not f then
+					f = NewPin(canvas)
+					frames[used] = f
+				end
+				at[key] = f
+				f.pin, f.x, f.y = pin, x, y
+				f.icon:SetTexture(pin.item and C_Item.GetItemIconByID(pin.item) or 134400)
+				Position(f, canvas, placedScale)
+				f:Show()
 			end
-			f.pin, f.x, f.y = pin, x, y
-			f.icon:SetTexture(pin.item and C_Item.GetItemIconByID(pin.item) or 134400)
-			Position(f, canvas, placedScale)
-			f:Show()
 		end
 	end
 end
@@ -284,12 +328,16 @@ local function OpenMap(mapId)
 	if map.SetMapID then pcall(map.SetMapID, map, mapId) end
 end
 
+-- Opens the map on the spot nearest to the player (the first one when none can be measured from
+-- here) and pins all the source's spots.
 function Pins.Show(source, itemId)
-	local spot = type(source) == "table" and type(source.spots) == "table" and source.spots[1]
+	local spots = type(source) == "table" and type(source.spots) == "table" and source.spots or nil
+	local spot = spots and spots[1]
 	if not spot or not spot.map then
 		ns.Print("No spot known.")
 		return false
 	end
+	if ns.Guide and ns.Guide.Nearest then spot = ns.Guide.Nearest(spots) or spot end
 	shown, shownSeen, dirty = { source = source, item = itemId }, false, true
 	OpenMap(spot.map)
 	return true

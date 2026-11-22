@@ -3,7 +3,10 @@ local _, ns = ...
 -- Tracker: a small list of tracked upgrades on screen.
 --   ns.Tracker.Refresh()
 --   ns.Tracker.Check()        looks for tracked items in bags and on the character
---   ns.Tracker.Toast(itemId)  the "Got it" message
+--   ns.Tracker.Toast(itemId, name, head)  a message on screen: "Got it", or the head given
+--   ns.Tracker.Worth(itemId)  -> text, delta: what the item is worth to the player against what is
+--                             worn ("+12", "No upgrade", "Equipped", "Level 31", "Can't use"); nil
+--                             when it cannot be said. The other lists of items use it too.
 -- Click a row: guide. Right-click: untrack. Shift-click: link.
 
 local UI = ns.UI
@@ -24,10 +27,10 @@ ns.Main.AddOption({ group = "Tracker", key = "trackerScale", kind = "slider", la
 
 local frame, pool, toast
 
--- Name with the suffix to look for.
+-- Name with the suffix to look for, for the player (not a Simulator preview).
 local function Name(id)
 	if ns.Gear and ns.Gear.Name then
-		local name, quality = ns.Gear.Name(id)
+		local name, quality = ns.Gear.Name(id, ns.Gear.PlayerContext())
 		if name then return name, quality end
 	end
 	local item = ns.Gear and ns.Gear.Item and ns.Gear.Item(id)
@@ -36,14 +39,97 @@ local function Name(id)
 	return name or ("Item " .. tostring(id)), quality
 end
 
+-- Chat link with the suffix to look for; the plain item when the game has no link for that.
 local function Link(id)
-	local _, link = C_Item.GetItemInfo(id)
+	local Gear = ns.Gear
+	local wanted = Gear and Gear.WantedLink and Gear.WantedLink(id, Gear.PlayerContext())
+	local _, link = C_Item.GetItemInfo(wanted or id)
+	if not link and wanted then _, link = C_Item.GetItemInfo(id) end
 	return link
 end
 
-local function FirstSource(id)
-	local sources = ns.Gear and ns.Gear.Sources and ns.Gear.Sources(id)
-	return sources and sources[1] or nil
+-- Where to go for a tracked item: its sources with a place on the map, the recipe's or the box's
+-- when the item's own have none (Gear.Ways). Each: { source, via }, via "recipe" or "box" then.
+local function Ways(id)
+	local Gear = ns.Gear
+	if Gear and Gear.Ways then return Gear.Ways(id) end
+	local way, via
+	if Gear and Gear.WayTo then
+		way, via = Gear.WayTo(id)
+	else
+		local sources = Gear and Gear.Sources and Gear.Sources(id)
+		way = sources and sources[1] or nil
+	end
+	return way and { { source = way, via = via } } or {}
+end
+
+-- One line that says how to get it, as the tooltip and the lists say it.
+local function Summary(id)
+	local Gear = ns.Gear
+	if Gear and Gear.SourceSummary then return (Gear.SourceSummary(id)) end
+	local sources = Gear and Gear.Sources and Gear.Sources(id)
+	local first = sources and sources[1]
+	return first and (first.text or first.name) or "Source unknown"
+end
+
+local VIA = { recipe = "Recipe: ", box = "Box: " }
+
+-- What the item is worth against what is worn: { text, delta }. Kept until gear, spec or the
+-- tracked list changes: a row is drawn again every two seconds.
+local worth = {}
+
+local function Worth(id)
+	local known = worth[id]
+	if known then return known end
+	local Gear = ns.Gear
+	known = {}
+	worth[id] = known
+	if not (Gear and Gear.Compare and Gear.WantedLink and Gear.PlayerContext) then return known end
+	local ctx = Gear.PlayerContext()
+	local ok, c = pcall(Gear.Compare, Gear.WantedLink(id, ctx), ctx)
+	if not ok or type(c) ~= "table" or c.known == false then return known end
+	if c.isWorn then
+		known.text, known.delta = UI.Colored("Equipped", C.GOLD_SOFT), 0
+	elseif c.usable == false then
+		if c.reason == "level" and c.atLevel then
+			known.text = UI.Colored("Level " .. c.atLevel, C.MUTED)
+		else
+			known.text = UI.Colored("Can't use", C.RED)
+		end
+	elseif type(c.delta) == "number" then
+		known.delta = c.delta
+		if c.delta > 0 then
+			known.text = ns.Tip and ns.Tip.Gain and ns.Tip.Gain(c.gain) or UI.Colored(("+%d"):format(c.gain or 0), C.GREEN)
+		else
+			-- still tracked, no longer better than what is worn
+			known.text = UI.Colored("No upgrade", C.FAINT)
+		end
+	end
+	return known
+end
+
+function Tracker.Worth(id)
+	local known = Worth(id)
+	return known.text, known.delta
+end
+
+-- The dungeon or raid the player is in, by name; nil in the open world.
+local function Inside()
+	if not GetInstanceInfo then return nil end
+	local ok, name, kind = pcall(GetInstanceInfo)
+	name, kind = ok and ns.Plain(name) or nil, ok and ns.Plain(kind) or nil
+	if type(name) ~= "string" or kind == nil or kind == "none" then return nil end
+	return name
+end
+
+-- The plan of an item's best source when it takes several steps (Upgrades.Plan), as a tooltip line.
+local function NextStep(id)
+	local plan = ns.Upgrades and ns.Upgrades.Plan and ns.Upgrades.Plan(id)
+	if type(plan) ~= "table" then return nil end
+	for i, step in ipairs(plan) do
+		if step.done ~= true then return ("Next step, %d of %d: %s"):format(i, #plan, step.text) end
+	end
+	return ("All %d steps done"):format(#plan)
 end
 
 -- Rows --------------------------------------------------------------------------------
@@ -62,8 +148,19 @@ local function RowClick(self, button)
 		local target = ns.Guide.Target()
 		if target and target.item == id then
 			ns.Guide.Clear()
-		elseif not ns.Guide.SetSource(FirstSource(id), id) then
-			ns.Print("No spot known.")
+		else
+			-- the nearest of all its places; the best source when none can be measured from here
+			local ways = Ways(id)
+			local way, best = ways[1], nil
+			for _, other in ipairs(ways) do
+				local _, yards = ns.Guide.Nearest(other.source.spots)
+				if yards and (not best or yards < best) then way, best = other, yards end
+			end
+			local label = way and way.via and (VIA[way.via] .. (way.source.name or way.source.text or "")) or nil
+			if not (way and ns.Guide.SetSource(way.source, id, label)) then
+				-- nowhere to point at: say what is known instead of only "no"
+				ns.Print(("%s: %s. No place on the map for it."):format(Name(id) or "Item", Summary(id)))
+			end
 		end
 	end
 end
@@ -80,9 +177,12 @@ local function MakeRow(i)
 	row.icon = UI.Icon(row, ROW - 6)
 	row.icon:SetPoint("LEFT", 2, 0)
 	row.icon:EnableMouse(false) -- the row takes the clicks
+	row.gain = UI.Text(row, "GameFontHighlightSmall", C.TEXT)
+	row.gain:SetPoint("TOPRIGHT", -2, -3)
+	row.gain:SetJustifyH("RIGHT")
 	row.name = UI.Text(row, "GameFontHighlightSmall", C.TEXT)
 	row.name:SetPoint("TOPLEFT", ROW + 2, -3)
-	row.name:SetPoint("RIGHT", -2, 0)
+	row.name:SetPoint("RIGHT", row.gain, "LEFT", -4, 0)
 	row.hint = UI.Text(row, "GameFontHighlightSmall", C.GOLD_SOFT, 11)
 	row.hint:SetPoint("BOTTOMRIGHT", -2, 3)
 	row.hint:SetJustifyH("RIGHT")
@@ -93,9 +193,13 @@ local function MakeRow(i)
 	row:SetScript("OnEnter", function(self)
 		self.hi:Show()
 		if not self.id then return end
-		UI.ItemTooltip(self, ns.Gear.Link and ns.Gear.Link(self.id) or self.id, "ANCHOR_LEFT")
+		local Gear = ns.Gear
+		UI.ItemTooltip(self, Gear.WantedLink and Gear.WantedLink(self.id, Gear.PlayerContext()) or self.id, "ANCHOR_LEFT")
+		local step = NextStep(self.id)
+		if step then GameTooltip:AddLine(step, C.TEXT[1], C.TEXT[2], C.TEXT[3], true) end
 		GameTooltip:AddLine("Click: guide", C.GOLD_SOFT[1], C.GOLD_SOFT[2], C.GOLD_SOFT[3])
 		GameTooltip:AddLine("Right-click: untrack", C.GOLD_SOFT[1], C.GOLD_SOFT[2], C.GOLD_SOFT[3])
+		GameTooltip:AddLine("Shift-click: link", C.GOLD_SOFT[1], C.GOLD_SOFT[2], C.GOLD_SOFT[3])
 		GameTooltip:Show()
 	end)
 	row:SetScript("OnLeave", function(self)
@@ -113,19 +217,22 @@ local function Build()
 	frame:EnableMouse(true)
 	frame:SetMovable(true)
 	frame:RegisterForDrag("LeftButton")
+	-- The window hangs by its top left corner, so that a change of height (folding, a row more)
+	-- moves its bottom edge and the fold button stays under the mouse. An older saved place (any
+	-- anchor the game picked) is used as it is and pinned at the first change of height.
 	local saved = ns.db.windows.Tracker
 	if saved and saved.x then
-		frame:SetPoint(saved.point or "CENTER", UIParent, saved.point or "CENTER", saved.x, saved.y)
+		frame:SetPoint(saved.point or "CENTER", UIParent, saved.rel or saved.point or "CENTER", saved.x, saved.y)
 	else
-		frame:SetPoint("RIGHT", UIParent, "RIGHT", -60, 60)
+		frame:SetPoint("TOPRIGHT", UIParent, "RIGHT", -60, 150)
 	end
 	frame:SetScript("OnDragStart", function(self)
 		if not ns.db.trackerLock then self:StartMoving() end
 	end)
 	frame:SetScript("OnDragStop", function(self)
 		self:StopMovingOrSizing()
-		local point, _, _, x, y = self:GetPoint(1)
-		ns.db.windows.Tracker = { point = point, x = x, y = y }
+		local left, top = self:GetLeft(), self:GetTop()
+		if left and top then ns.db.windows.Tracker = { point = "TOPLEFT", rel = "BOTTOMLEFT", x = left, y = top } end
 	end)
 
 	frame.title = UI.Heading(frame, 14)
@@ -136,8 +243,15 @@ local function Build()
 		ns.db.trackerCollapsed = not ns.db.trackerCollapsed
 		Tracker.Refresh()
 	end)
-	frame.more = UI.Text(frame, "GameFontHighlightSmall", C.MUTED, 11)
-	frame.more:SetPoint("BOTTOMLEFT", 8, 5)
+	-- the items that do not fit: a click opens the whole list
+	frame.more = CreateFrame("Button", nil, frame)
+	frame.more:SetSize(WIDTH - 16, 16)
+	frame.more:SetPoint("BOTTOMLEFT", 8, 3)
+	frame.more.text = UI.Text(frame.more, "GameFontHighlightSmall", C.MUTED, 11)
+	frame.more.text:SetPoint("LEFT", 0, 0)
+	frame.more:SetScript("OnClick", function() ns.Main.Open("tracked") end)
+	frame.more:SetScript("OnEnter", function(self) UI.Color(self.text, C.GOLD) end)
+	frame.more:SetScript("OnLeave", function(self) UI.Color(self.text, C.MUTED) end)
 	pool = UI.Pool(MakeRow)
 end
 
@@ -152,17 +266,22 @@ local function HereMaps()
 	return here
 end
 
-local function Hint(source, here)
-	if not (source and type(source.spots) == "table" and ns.Guide) then return nil end
+-- Where the item is from here: "120 yd NE" for the nearest of all its spots on the player's maps,
+-- "Here" in the dungeon it drops in. nil: not around.
+local function Hint(ways, here, inside)
 	local near
-	for i = 1, #source.spots do
-		local spot = source.spots[i]
-		if here[spot.map] then
-			near = near or {}
-			near[#near + 1] = spot
+	for _, way in ipairs(ways) do
+		local source = way.source
+		if inside and source.inst == inside then return "Here" end
+		for i = 1, #(source.spots or {}) do
+			local spot = source.spots[i]
+			if here[spot.map] then
+				near = near or {}
+				near[#near + 1] = spot
+			end
 		end
 	end
-	if not near then return nil end
+	if not (near and ns.Guide) then return nil end
 	return ns.Guide.Hint((ns.Guide.Nearest(near)))
 end
 
@@ -175,33 +294,55 @@ function Tracker.Refresh()
 	end
 	if not frame then Build() end
 	frame:SetScale((ns.db.trackerScale or 100) / 100)
-	frame.title:SetText(("Upgrades: %d"):format(#ids))
+	frame.title:SetText(("Tracked: %d"):format(#ids))
 	local folded = ns.db.trackerCollapsed
 	frame.fold:SetLabel(folded and "+" or "-")
 	local n = 0
 	if not folded then
-		local here = HereMaps()
+		local here, inside = HereMaps(), Inside()
 		local target = ns.Guide and ns.Guide.Target()
-		n = math.min(#ids, MAX_ROWS)
-		for i = 1, n do
+		-- what can be had around here first, then the biggest gain
+		local rows = {}
+		for i = 1, #ids do
 			local id = ids[i]
+			local hint = Hint(Ways(id), here, inside)
+			rows[i] = { id = id, hint = hint, worth = Worth(id) }
+		end
+		table.sort(rows, function(a, b)
+			if (a.hint ~= nil) ~= (b.hint ~= nil) then return a.hint ~= nil end
+			local da, db = a.worth.delta or -math.huge, b.worth.delta or -math.huge
+			if da ~= db then return da > db end
+			return a.id < b.id
+		end)
+		n = math.min(#rows, MAX_ROWS)
+		for i = 1, n do
+			local entry = rows[i]
+			local id = entry.id
 			local row = pool:Get(i)
 			row.id = id
 			local name, quality = Name(id)
-			local source = FirstSource(id)
 			row.icon:SetItem(id, quality)
 			if target and target.item == id then row.icon:SetEdge(C.GOLD) end
+			row.gain:SetText(entry.worth.text or "")
 			row.name:SetText(name)
 			UI.Color(row.name, UI.QUALITY[quality or 1] or C.TEXT)
-			row.source:SetText(source and (source.text or source.name) or "Source: unknown")
-			row.hint:SetText(Hint(source, here) or "")
+			row.source:SetText(Summary(id))
+			row.hint:SetText(entry.hint or "")
 		end
 	end
 	pool:HideFrom(n + 1)
 	local extra = folded and 0 or #ids - n
 	frame.more:SetShown(extra > 0)
-	if extra > 0 then frame.more:SetText(("More: %d"):format(extra)) end
-	frame:SetHeight(HEAD + n * ROW + (extra > 0 and 18 or 0) + (n > 0 and 4 or 0))
+	if extra > 0 then frame.more.text:SetText(("More: %d"):format(extra)) end
+	local height = HEAD + n * ROW + (extra > 0 and 18 or 0) + (n > 0 and 4 or 0)
+	if math.abs((frame:GetHeight() or 0) - height) > 0.5 then
+		local left, top = frame:GetLeft(), frame:GetTop()
+		if left and top then
+			frame:ClearAllPoints()
+			frame:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left, top)
+		end
+		frame:SetHeight(height)
+	end
 	frame:Show()
 end
 
@@ -234,10 +375,11 @@ local function BuildToast()
 	toast:Hide()
 end
 
-function Tracker.Toast(id, shown)
+function Tracker.Toast(id, shown, head)
 	if not toast then BuildToast() end
 	local name, quality = Name(id)
 	name = shown or name
+	toast.head:SetText(head or "Got it")
 	toast.icon:SetItem(id, quality)
 	toast.name:SetText(name)
 	UI.Color(toast.name, UI.QUALITY[quality or 1] or C.TEXT)
@@ -264,14 +406,15 @@ end
 local function Got(id, link)
 	local Gear = ns.Gear
 	local name = Name(id) -- before the hunt and its suffix are cleared
+	link = ns.Plain(link)
+	local shown = type(link) == "string" and link or Link(id) or name
 	local suffix = WantedSuffix(id)
 	Gear.SetState(id, "done", suffix)
 	Gear.Track(id, false)
 	local target = ns.Guide and ns.Guide.Target()
 	if target and target.item == id then ns.Guide.Clear() end
 	if ns.db.trackerToast then Tracker.Toast(id, name) end
-	link = ns.Plain(link)
-	ns.Print("Got it: " .. (type(link) == "string" and link or Link(id) or name))
+	ns.Print("Got it: " .. shown)
 end
 
 -- Marks tracked items the player now has.
@@ -314,16 +457,28 @@ ns.On("PLAYER_EQUIPMENT_CHANGED", check)
 
 local refresh = ns.Debounce(0.1, Tracker.Refresh)
 ns.Listen("HUNTS_CHANGED", function()
+	worth = {}
 	refresh()
 	check() -- a newly tracked item may already be in the bags
 end)
+-- what an item is worth changes with what is worn and with the spec
+for _, message in ipairs({ "GEAR_CHANGED", "CONTEXT_CHANGED" }) do
+	ns.Listen(message, function()
+		worth = {}
+		refresh()
+	end)
+end
 ns.Listen("GUIDE_CHANGED", refresh)
 ns.Listen("SETTINGS_CHANGED", function(key)
 	if type(key) == "string" and key:find("^tracker") then Tracker.Refresh() end
 end)
 ns.On("ZONE_CHANGED_NEW_AREA", refresh)
-ns.On("GET_ITEM_INFO_RECEIVED", function()
-	if frame and frame:IsShown() then refresh() end
+-- Item data comes for every item any addon asks about, in bursts (an auction scan): only a
+-- tracked item's name can change a row.
+ns.On("GET_ITEM_INFO_RECEIVED", function(_, id)
+	id = ns.Plain(id)
+	local Gear = ns.Gear
+	if frame and frame:IsShown() and (type(id) ~= "number" or not (Gear and Gear.IsTracked) or Gear.IsTracked(id)) then refresh() end
 end)
 
 ns.OnLoad(function()
@@ -337,17 +492,30 @@ end)
 
 -- Slash -------------------------------------------------------------------------------
 
-ns.Command("track", "Track: <item link>", function(rest)
-	local id = ns.ItemID(rest)
+ns.Command("track", "Tracked items. Track: <item link or name>", function(rest)
+	-- a link, an id or a name of the data (Wanted.Find)
+	local item = ns.Wanted and ns.Wanted.Find and ns.Wanted.Find(rest) or rest
+	local id = ns.ItemID(item)
 	local Gear = ns.Gear
 	if not id then
-		ns.Print("Use: /lm track <item link>")
+		if rest and rest:match("%S") then
+			ns.Print("Use: /lm track <item link or name>")
+		else
+			ns.Main.Toggle("tracked")
+		end
 		return
 	end
 	if not (Gear and Gear.Track) then return end
-	local suffix = Gear.LinkSuffixID and Gear.LinkSuffixID(rest) or nil
-	if Gear.State and Gear.State(id, suffix) then Gear.SetState(id, nil, suffix) end
-	Gear.Track(id, true, suffix)
+	if ns.Wanted and ns.Wanted.Add then
+		-- the tracked list's own way in: an id neither the data nor the game knows is refused
+		if not ns.Wanted.Add(item) then
+			ns.Print("Track: no such item")
+			return
+		end
+	else
+		local suffix = type(item) == "string" and Gear.LinkSuffixID and Gear.LinkSuffixID(item) or nil
+		Gear.Track(id, true, suffix)
+	end
 	ns.Print("Tracked: " .. (Link(id) or (Name(id))))
 end)
 
@@ -367,6 +535,7 @@ ns.Command("untrack", "Untrack: <item link> or all", function(rest)
 		ns.Print("Use: /lm untrack <item link> or all")
 		return
 	end
+	local shown = Link(id) or (Name(id)) -- before the hunt and its suffix are cleared
 	Gear.Track(id, false)
-	ns.Print("Untracked: " .. (Link(id) or (Name(id))))
+	ns.Print("Untracked: " .. shown)
 end)

@@ -38,8 +38,8 @@ ns.Defaults({
 	scanAt = 0, -- ids of ns.Data.missing already asked
 	scanSize = 0,
 })
-ns.Main.AddOption({ group = "Collector", key = "collect", kind = "check", label = "Collect loot data", default = true,
-	tip = "Saves drops, vendors and quest rewards you see." })
+ns.Main.AddOption({ group = "Collector", key = "collect", kind = "check", label = "Remember what you see", default = true,
+	tip = "Drops, vendor prices and quest rewards, for the drop chances and prices in tooltips. Stays on this computer." })
 
 local function Data() return ns.db and ns.db.collected end
 local function On() return ns.db and ns.db.collect and ns.db.collected and true or false end
@@ -103,6 +103,7 @@ local NOT_GEAR = { [""] = true, INVTYPE_NON_EQUIP = true, INVTYPE_NON_EQUIP_IGNO
 
 local checked = {} -- "id:suffix" looked at this session
 local waiting = {} -- id -> link, item data not in the cache yet
+local late, asked = {}, {} -- id -> link of an item the game did not know at all; key -> asked for once
 
 local function Instant(id)
 	if not (C_Item and C_Item.GetItemInfoInstant) then return nil end
@@ -155,7 +156,19 @@ function Collector.See(link)
 	end
 	if Gear.Item(id) ~= nil then return end
 	local loc = Instant(id)
-	if not loc or NOT_GEAR[loc] then return end
+	if not loc then
+		-- The game does not know the item yet (a server-only item, seen for the first time): it is
+		-- asked for and looked at again when its data comes. Once: an item the game never learns
+		-- stays marked.
+		if not asked[key] and C_Item.RequestLoadItemDataByID then
+			asked[key] = true
+			checked[key] = nil
+			late[id] = link
+			C_Item.RequestLoadItemDataByID(id)
+		end
+		return
+	end
+	if NOT_GEAR[loc] then return end
 	if not Store(id, link) then
 		waiting[id] = link
 		if C_Item.RequestLoadItemDataByID then C_Item.RequestLoadItemDataByID(id) end
@@ -189,8 +202,36 @@ local function Wanted(id, link, slotQuality)
 	return type(quality) == "number" and quality >= 2
 end
 
+-- Loot that is not a kill's. What Pick Pocket or Skinning takes off a creature comes in a loot
+-- window with that creature as its source: counted as a looted corpse, it lowers every chance of
+-- the creature, and after Pick Pocket the real corpse was skipped as "seen". The spell names hold
+-- for every rank, in the client's language.
+local SIDE_SPELLS = { 921, 8613 } -- Pick Pocket, Skinning
+local sideNames, sideAt
+local function SpellName(id)
+	if type(id) ~= "number" then return nil end
+	if C_Spell and C_Spell.GetSpellName then return ns.Plain(C_Spell.GetSpellName(id)) end
+	if GetSpellInfo then return ns.Plain((GetSpellInfo(id))) end
+	return nil
+end
+ns.On("UNIT_SPELLCAST_SUCCEEDED", function(_, unit, _, spellID)
+	if ns.Plain(unit) ~= "player" then return end
+	if not sideNames then
+		sideNames = {}
+		for _, id in ipairs(SIDE_SPELLS) do
+			local name = SpellName(id)
+			if name then sideNames[name] = true end
+		end
+	end
+	local name = SpellName(ns.Plain(spellID))
+	if name and sideNames[name] then sideAt = GetTime() end
+end)
+
 local function ReadLoot()
 	if not On() or not (GetNumLootItems and GetLootSourceInfo) then return end
+	if IsFishingLoot and IsFishingLoot() then return end
+	-- the loot window that follows the player's Pick Pocket or Skinning: creatures are left alone
+	local side = sideAt ~= nil and GetTime() - sideAt < 2
 	local item = (Enum and Enum.LootSlotType and Enum.LootSlotType.Item) or 1
 	local sources = {} -- guid -> { itemId = true }
 	for slot = 1, GetNumLootItems() or 0 do
@@ -213,7 +254,7 @@ local function ReadLoot()
 	local zone, inst
 	for guid, items in pairs(sources) do
 		local key = SourceKey(guid)
-		if key and not looted[guid] then
+		if key and not looted[guid] and not (side and type(key) == "number") then
 			if lootedCount > 4000 then looted, lootedCount = {}, 0 end
 			looted[guid] = true
 			lootedCount = lootedCount + 1
@@ -421,6 +462,11 @@ ns.On("GET_ITEM_INFO_RECEIVED", function(_, id, success)
 		waiting[id] = nil
 		if success then Store(id, link) end
 	end
+	local again = late[id]
+	if again then
+		late[id] = nil
+		if success then Collector.See(again) end
+	end
 end)
 
 ns.Command("scan", "Cache missing items. Also: stop", function(rest)
@@ -449,7 +495,7 @@ ns.Command("scan", "Cache missing items. Also: stop", function(rest)
 	scan = { list = list, asked = {}, reported = math.floor(ns.db.scanAt / SCAN_REPORT) }
 	ns.Print(("Scan: started at %d/%d"):format(ns.db.scanAt, #list))
 	scan.ticker = C_Timer.NewTicker(SCAN_EVERY, function() ns.Safe(ScanStep) end)
-end)
+end, true)
 
 -- Counts ------------------------------------------------------------------------------
 
@@ -462,7 +508,7 @@ end
 ns.Command("collect", "Collected data counts", function()
 	ns.Print(("Collected. Loot: %d, Vendors: %d, Quests: %d, Items: %d, No item: %d"):format(Collector.Counts()))
 	ns.Print("Collecting: " .. (ns.db.collect and "on" or "off"))
-end)
+end, true)
 
 -- Old or broken saved data: keep the shape.
 ns.OnLoad(function()

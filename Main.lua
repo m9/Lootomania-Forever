@@ -35,9 +35,15 @@ local function Build()
 	tabBar:SetPoint("TOPLEFT", 0, 0)
 	tabBar:SetPoint("TOPRIGHT", 0, 0)
 	for _, tab in ipairs(order) do tabBar:Add(tab) end
-	window:SetScript("OnShow", function()
+	window:HookScript("OnShow", function() -- HookScript: UI.Window has its own OnShow and OnHide
 		Main.Open(current or ns.db.lastTab)
 	end)
+end
+
+-- The window frame, built when first asked for: the side panel hangs on it.
+function Main.Window()
+	if not window then Build() end
+	return window
 end
 
 -- Opens the window on a tab (the last one used when key is nil).
@@ -45,6 +51,8 @@ function Main.Open(key)
 	if not window then Build() end
 	local tab = tabs[key] or tabs[ns.db.lastTab] or order[1]
 	if not tab then return end
+	-- the side panel is about what the tab showed: another tab closes it
+	if current ~= tab.key and ns.Side then ns.Side.Close() end
 	current = tab.key
 	ns.db.lastTab = tab.key
 	if not window:IsShown() then
@@ -138,7 +146,7 @@ end
 
 function Main.ApplyMinimap()
 	if not Minimap then return end
-	if ns.db.minimap.hide then
+	if ns.db.minimapButton == false then
 		if button then button:Hide() end
 		return
 	end
@@ -147,12 +155,17 @@ function Main.ApplyMinimap()
 	button:Show()
 end
 
-ns.OnLoad(Main.ApplyMinimap)
-
-ns.Command("minimap", "Minimap button on/off", function()
-	ns.db.minimap.hide = not ns.db.minimap.hide
+ns.OnLoad(function()
+	-- the button's on/off was kept beside its angle; it is a setting of its own now
+	if ns.db.minimap.hide then
+		ns.db.minimap.hide = false
+		ns.db.minimapButton = false
+	end
 	Main.ApplyMinimap()
-	ns.Print("Minimap button: " .. (ns.db.minimap.hide and "off" or "on"))
+end)
+
+ns.Listen("SETTINGS_CHANGED", function(key)
+	if key == "minimapButton" then Main.ApplyMinimap() end
 end)
 
 -- Settings tab ------------------------------------------------------------------------
@@ -175,6 +188,17 @@ function Main.AddOption(option)
 end
 
 local controls = {}
+local ShowSettings
+
+-- Every setting back to its default. Tracked items, history, custom specs and window places are
+-- not settings and stay.
+function Main.ResetOptions()
+	for _, option in ipairs(options) do
+		-- keep: a setting whose default would delete what the player has (runs of the history)
+		if option.default ~= nil and not option.keep then ns.Set(option.key, option.default) end
+	end
+	if ShowSettings then ShowSettings() end
+end
 
 local function BuildSettings(panel)
 	local scroll = UI.Scroll(panel)
@@ -221,10 +245,30 @@ local function BuildSettings(panel)
 		end
 		columns[col] = -y + 14
 	end
-	content:SetHeight(math.max(columns[1], columns[2], columns[3]) + 10)
+	-- under the columns: all settings back to their defaults, on a second click
+	local bottom = math.max(columns[1], columns[2], columns[3]) + 6
+	local reset = UI.Button(content, "Reset settings", 150, 22)
+	reset:SetPoint("TOPLEFT", 0, -bottom)
+	local function disarm(self)
+		self.armed = nil
+		self:SetLabel("Reset settings")
+	end
+	reset:SetScript("OnClick", function(self)
+		if self.armed and GetTime() < self.armed then
+			disarm(self)
+			Main.ResetOptions()
+			ns.Print("Settings: back to the defaults")
+		else
+			self.armed = GetTime() + 5
+			self:SetLabel("Click again to reset")
+		end
+	end)
+	reset:SetScript("OnHide", disarm)
+	UI.Tip(reset, "Reset settings", { "Every setting back to its default, but \"Runs to keep\". Tracked items, history and custom specs stay." })
+	content:SetHeight(bottom + 34)
 end
 
-local function ShowSettings()
+ShowSettings = function()
 	for _, control in ipairs(controls) do
 		local value = ns.db[control.option.key]
 		if control.option.kind == "check" then
@@ -238,6 +282,7 @@ end
 Main.AddTab("settings", "Settings", 900, BuildSettings, ShowSettings)
 
 Main.AddOption({ group = "General", key = "welcome", kind = "check", label = "Login message", default = true })
+Main.AddOption({ group = "General", key = "minimapButton", kind = "check", label = "Minimap button", default = true })
 -- lazy: the slider sits in the window it scales
 Main.AddOption({ group = "Main window", key = "mainScale", kind = "slider", label = "Scale", min = 60, max = 140, step = 5,
 	format = "%d%%", default = 100, lazy = true })

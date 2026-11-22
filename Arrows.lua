@@ -8,8 +8,8 @@ local C = UI.C
 local Arrows = {}
 ns.Arrows = Arrows
 
-ns.Main.AddOption({ group = "Tooltips", key = "arrowOn", kind = "check", label = "Upgrade arrows", default = true,
-	tip = "On quest rewards, loot and merchants." })
+ns.Main.AddOption({ group = "Upgrades", key = "arrowOn", kind = "check", label = "Upgrade arrows", default = true,
+	tip = "On quest rewards, loot and at vendors. Green: for your spec. Gold: for another spec of yours." })
 
 local ATLAS = "bags-greenarrow"
 local TEXTURE = "Interface\\Buttons\\Arrow-Up-Up"
@@ -21,35 +21,79 @@ local surfaces = {} -- name -> { button = used this pass }
 
 local function On() return ns.db and ns.db.arrowOn and ns.Gear and ns.Gear.Compare and true or false end
 
--- Gain of an item over worn gear when it is an upgrade, else nil.
+-- Gain of an item over worn gear when it is an upgrade, else nil. Always the player's own gain,
+-- also while the Simulator previews another character.
+-- Returns two numbers: the gain as shown ("+89": points on the scale of the item's own slot),
+-- and the worth of that gain on one scale for all slots. Compare items of different slots by
+-- the second: +100 on a trinket can be worth a third of +89 on a chest.
 function Arrows.Gain(link)
 	link = ns.Plain(link)
 	if type(link) ~= "string" or link == "" or not ns.Gear or not ns.Gear.Compare then return nil end
 	local gain = gains[link]
 	if gain == nil then
 		gain = false
-		local ok, c = pcall(ns.Gear.Compare, link)
+		local ok, c = pcall(ns.Gear.Compare, link, ns.Gear.PlayerContext())
 		if ok and type(c) == "table" and c.usable ~= false and type(c.delta) == "number" and c.delta > 0 then
-			gain = type(c.gain) == "number" and c.gain > 0 and c.gain or c.delta
+			gain = { type(c.gain) == "number" and c.gain > 0 and c.gain or c.delta, c.delta }
 		end
 		gains[link] = gain
 	end
-	return gain or nil
+	if not gain then return nil end
+	return gain[1], gain[2]
 end
 
 function Arrows.IsUpgrade(link) return Arrows.Gain(link) ~= nil end
 
+-- An item that is no upgrade for the spec in use and is one for another spec of the character:
+-- that spec's gain and its name. nil otherwise.
+local others = {} -- link -> { gain, label }, or false
+function Arrows.OtherGain(link)
+	link = ns.Plain(link)
+	if type(link) ~= "string" or link == "" or not ns.Gear or not ns.Gear.OtherGains then return nil end
+	local other = others[link]
+	if other == nil then
+		other = false
+		if not Arrows.Gain(link) then
+			local ok, list = pcall(ns.Gear.OtherGains, link, ns.Gear.PlayerContext())
+			local best = ok and type(list) == "table" and list[1]
+			if best and type(best.gain) == "number" then other = { best.gain, best.label } end
+		end
+		others[link] = other
+	end
+	if not other then return nil end
+	return other[1], other[2]
+end
+
+-- Returns how the arrow was made, for Tint: "atlas", "texture" or "plain".
 local function PaintArrow(t)
 	local info
 	if C_Texture and C_Texture.GetAtlasInfo then
 		local ok, found = pcall(C_Texture.GetAtlasInfo, ATLAS)
 		info = ok and found
 	end
-	if info and t.SetAtlas and pcall(t.SetAtlas, t, ATLAS) then return end
+	if info and t.SetAtlas and pcall(t.SetAtlas, t, ATLAS) then return "atlas" end
 	if t:SetTexture(TEXTURE) == false then
 		t:SetColorTexture(C.GREEN[1], C.GREEN[2], C.GREEN[3], 1) -- plain square when the file is missing
+		return "plain"
+	end
+	t:SetVertexColor(0.25, 1, 0.25)
+	return "texture"
+end
+
+-- Green for the spec in use, gold for another spec of the character.
+local function Tint(o, other)
+	other = other and true or false
+	if o.other == other then return end
+	o.other = other
+	local t, gold = o.arrow, C.GOLD
+	if o.made == "atlas" then
+		if t.SetDesaturated then t:SetDesaturated(other) end
+		if other then t:SetVertexColor(gold[1], gold[2], gold[3]) else t:SetVertexColor(1, 1, 1) end
+	elseif o.made == "texture" then
+		if other then t:SetVertexColor(gold[1], gold[2], gold[3]) else t:SetVertexColor(0.25, 1, 0.25) end
 	else
-		t:SetVertexColor(0.25, 1, 0.25)
+		local c = other and gold or C.GREEN
+		t:SetColorTexture(c[1], c[2], c[3], 1)
 	end
 end
 
@@ -71,7 +115,7 @@ local function Overlay(button)
 	o.arrow = button:CreateTexture(nil, "OVERLAY", nil, 7)
 	o.arrow:SetSize(SIZE, SIZE)
 	o.arrow:SetPoint("TOPLEFT", icon, "TOPLEFT", -2, 2)
-	PaintArrow(o.arrow)
+	o.made = PaintArrow(o.arrow)
 	o.arrow:Hide()
 	-- gold ring: four thin edges around the icon
 	for i, edge in ipairs({ { "TOPLEFT", "TOPRIGHT" }, { "BOTTOMLEFT", "BOTTOMRIGHT" }, { "TOPLEFT", "BOTTOMLEFT" }, { "TOPRIGHT", "BOTTOMRIGHT" } }) do
@@ -87,32 +131,36 @@ local function Overlay(button)
 	return o
 end
 
-local function Paint(button, arrow, ring)
+-- arrow: an upgrade for the spec in use. other: for another spec (a gold arrow). ring: gold ring too.
+local function Paint(button, arrow, ring, other)
 	local o = overlays[button]
 	if not o then
-		if not arrow and not ring then return end
+		if not arrow and not ring and not other then return end
 		o = Overlay(button)
 	end
-	o.arrow:SetShown(arrow and true or false)
+	o.arrow:SetShown((arrow or other) and true or false)
+	Tint(o, other and not arrow)
 	for i = 1, #o.ring do o.ring[i]:SetShown(ring and true or false) end
 end
 
 -- Shows or hides the arrow on a button for an item link. ring: gold ring too.
--- Returns the gain when the item is an upgrade.
+-- Returns the gain when the item is an upgrade for the spec in use.
 function Arrows.Mark(button, link, ring)
 	if not button then return nil end
-	local gain = On() and Arrows.Gain(link) or nil
-	Paint(button, gain, ring and gain)
+	local on = On()
+	local gain = on and Arrows.Gain(link) or nil
+	Paint(button, gain, ring and gain, on and not gain and Arrows.OtherGain(link))
 	return gain
 end
 
 function Arrows.Hide(button) Paint(button, false, false) end
 
--- State of a button, for tests and other modules: arrow shown, ring shown.
+-- State of a button, for tests and other modules: arrow shown, ring shown, the arrow is for
+-- another spec.
 function Arrows.State(button)
 	local o = overlays[button]
-	if not o then return false, false end
-	return o.arrow:IsShown(), o.ring[1]:IsShown()
+	if not o then return false, false, false end
+	return o.arrow:IsShown(), o.ring[1]:IsShown(), o.arrow:IsShown() and o.other or false
 end
 
 -- A surface remembers its buttons so that reused ones lose a stale arrow.
@@ -164,7 +212,8 @@ function Arrows.UpdateQuest()
 			end
 		end
 		local inLog = _G.QuestInfoFrame and _G.QuestInfoFrame.questLog
-		local best, bestGain, choices = nil, 0, 0
+		-- the ring goes to the choice that is worth most, on the scale that is the same for all slots
+		local best, bestWorth, choices = nil, 0, 0
 		local marked = {}
 		for _, entry in ipairs(found) do
 			local button = entry.button
@@ -173,17 +222,17 @@ function Arrows.UpdateQuest()
 				local log = entry.log
 				if log == nil then log = inLog and true or false end
 				local link = Call(log and GetQuestLogItemLink or GetQuestItemLink, kind, button:GetID())
-				local gain = Arrows.Gain(link)
+				local gain, worth = Arrows.Gain(link)
 				s[button] = true
-				marked[#marked + 1] = { button = button, gain = gain }
+				marked[#marked + 1] = { button = button, gain = gain, other = not gain and Arrows.OtherGain(link) }
 				if kind == "choice" then
 					choices = choices + 1
-					if gain and gain > bestGain then best, bestGain = button, gain end
+					if worth and worth > bestWorth then best, bestWorth = button, worth end
 				end
 			end
 		end
 		for _, m in ipairs(marked) do
-			Paint(m.button, m.gain, m.gain and choices > 1 and m.button == best)
+			Paint(m.button, m.gain, m.gain and choices > 1 and m.button == best, m.other)
 		end
 	end
 	End(s)
@@ -263,6 +312,7 @@ local later = ns.Debounce(0.1, Arrows.Refresh)
 
 local function Reset()
 	wipe(gains)
+	wipe(others)
 	later()
 	local api = _G.Baganator and _G.Baganator.API
 	if api and api.IsUpgradePluginActive and api.RequestItemButtonsRefresh then
@@ -322,4 +372,54 @@ for _, message in ipairs({ "CONTEXT_CHANGED", "GEAR_CHANGED", "FILTERS_CHANGED" 
 end
 ns.Listen("SETTINGS_CHANGED", function(key)
 	if key == "arrowOn" then Reset() end
+end)
+
+-- Looted upgrades -------------------------------------------------------------------------------
+-- A chat line when the player picks up an item that is better than what is worn: with auto-loot
+-- the loot window and its arrows are never seen, and the bags show no mark of their own.
+
+ns.Main.AddOption({ group = "Upgrades", key = "lootNote", kind = "check", label = "Looted upgrade message", default = true,
+	tip = "Chat line when you pick up an item that is better than what you wear." })
+
+-- The game's own lines for loot the player gets ("You receive loot: %s."), as patterns.
+local selfLoot
+local function SelfLoot()
+	if selfLoot then return selfLoot end
+	selfLoot = {}
+	for _, key in ipairs({ "LOOT_ITEM_SELF", "LOOT_ITEM_SELF_MULTIPLE", "LOOT_ITEM_PUSHED_SELF", "LOOT_ITEM_PUSHED_SELF_MULTIPLE" }) do
+		local text = _G[key]
+		if type(text) == "string" and text ~= "" then
+			text = text:gsub("%%%d+%$", "%%")
+			text = text:gsub("[%^%$%(%)%.%[%]%*%+%-%?]", "%%%0")
+			text = text:gsub("%%s", ".+"):gsub("%%d", "%%d+")
+			selfLoot[#selfLoot + 1] = "^" .. text .. "$"
+		end
+	end
+	return selfLoot
+end
+
+ns.On("CHAT_MSG_LOOT", function(_, message)
+	if not (ns.db and ns.db.lootNote and ns.Gear and ns.Gear.Compare) then return end
+	message = ns.Plain(message)
+	if type(message) ~= "string" then return end
+	local mine = false
+	for _, pattern in ipairs(SelfLoot()) do
+		if message:find(pattern) then
+			mine = true
+			break
+		end
+	end
+	if not mine then return end
+	local link = message:match("(|c.-|Hitem:.-|h.-|h|r)") or message:match("(|Hitem:.-|h.-|h)")
+	if not link then return end
+	-- a tracked item has its own "Got it" message
+	local id = ns.ItemID(link)
+	if id and ns.Gear.IsTracked and ns.Gear.IsTracked(id) then return end
+	local gain = Arrows.Gain(link)
+	if gain then
+		ns.Print(("Upgrade looted: %s +%d"):format(link, math.max(1, math.floor(gain + 0.5))))
+		return
+	end
+	local other, label = Arrows.OtherGain(link)
+	if other then ns.Print(("Upgrade looted for %s: %s +%d"):format(label, link, math.max(1, math.floor(other + 0.5)))) end
 end)

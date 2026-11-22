@@ -33,20 +33,52 @@ local popup
 local function Call(...) return ns.Upgrades.Call(...) end
 local function List(...) return ns.Upgrades.List(...) end
 
+-- The player's own gear: a Simulator preview does not count on the character frame.
+local function Player() return Call("PlayerContext") end
+
 local function Top(slot)
-	return List("List", slot, nil, { count = TOP, anyZone = true })
+	return List("List", slot, Player(), { count = TOP, anyZone = true })
 end
 
 -- Popup -----------------------------------------------------------------------------------------
 
 local WIDTH, ROW = 330, 38
 
+-- True when one of the player's filters is on (the zone box does not count here: the lists of
+-- the character frame leave it out).
+local function Filtered()
+	return ns.Filters ~= nil and ns.Filters.Active ~= nil and ns.Filters.Active() > 0
+end
+
+local FillPopup
+
 local function PopupRow(i)
-	local row = CreateFrame("Frame", nil, popup)
+	local row = CreateFrame("Button", nil, popup)
 	row:SetSize(WIDTH - 12, ROW - 2)
 	row:SetPoint("TOPLEFT", 6, -34 - (i - 1) * ROW)
 	row.back = UI.Fill(row, "BACKGROUND", C.PANEL, 0.9)
 	row.back:SetAllPoints()
+	row.over = UI.Fill(row, "BORDER", C.GOLD, 0.08)
+	row.over:SetAllPoints()
+	row.over:Hide()
+	row:SetScript("OnEnter", function(self) self.over:Show() end)
+	row:SetScript("OnLeave", function(self) self.over:Hide() end)
+	-- a click: the slot's list in the main window, and how to get this item beside it;
+	-- a right-click: track it, or untrack
+	row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+	row:SetScript("OnClick", function(self, button)
+		local slot, id = popup.slot, self.id
+		if button == "RightButton" then
+			if id then
+				Call("Track", id, not Call("IsTracked", id, self.suffix), self.suffix)
+				FillPopup()
+			end
+			return
+		end
+		popup:Hide()
+		if slot then ns.Upgrades.OpenSlot(slot) end
+		if id and ns.Side and ns.Side.Item then ns.Side.Item(id) end
+	end)
 	row.icon = UI.Icon(row, 28)
 	row.icon:SetPoint("LEFT", 4, 0)
 	row.name = UI.Text(row, "GameFontHighlightSmall", C.TEXT)
@@ -59,6 +91,11 @@ local function PopupRow(i)
 	row.delta:SetPoint("TOPRIGHT", -6, -4)
 	row.delta:SetWidth(56)
 	row.delta:SetJustifyH("RIGHT")
+	-- the Track star of the Upgrades tab: on a tracked item
+	row.star = row:CreateTexture(nil, "OVERLAY")
+	row.star:SetSize(12, 12)
+	row.star:SetPoint("BOTTOMRIGHT", -6, 4)
+	row.star:SetTexture("Interface\\TargetingFrame\\UI-RaidTargetingIcon_1")
 	return row
 end
 
@@ -78,6 +115,9 @@ local function BuildPopup()
 	popup.empty = UI.Text(popup, "GameFontHighlightSmall", C.FAINT)
 	popup.empty:SetPoint("TOP", 0, -42)
 	popup.empty:SetText("No items")
+	popup.hint = UI.Text(popup, "GameFontHighlightSmall", C.FAINT, 11)
+	popup.hint:SetPoint("BOTTOMLEFT", 8, 11)
+	popup.hint:SetText("Click: how to get it. Right-click: track")
 	popup.more = UI.Button(popup, "More", 70, 22)
 	popup.more:SetPoint("BOTTOMRIGHT", -6, 6)
 	popup.more:SetScript("OnClick", function()
@@ -88,7 +128,7 @@ local function BuildPopup()
 	table.insert(UISpecialFrames, "LootomaniaSlotPopup")
 end
 
-local function FillPopup()
+FillPopup = function()
 	local slot = popup.slot
 	popup.title:SetText(ns.Upgrades.SlotLabel(slot))
 	local list = Top(slot)
@@ -96,14 +136,19 @@ local function FillPopup()
 	for i = 1, n do
 		local entry = list[i]
 		local row = popup.pool:Get(i)
+		row.id = entry.id
+		row.suffix = entry.suffix and entry.suffix.id or nil
+		row.star:SetShown(Call("IsTracked", entry.id, row.suffix) and true or false)
 		row.icon:SetItem(entry.link or entry.id, entry.quality)
 		row.name:SetText(ns.Upgrades.ItemName(entry))
 		UI.Color(row.name, entry.quality and UI.QUALITY[entry.quality] or C.TEXT)
-		row.source:SetText(entry.source and ns.Upgrades.SourceLine(entry.source) or "")
+		row.source:SetText(ns.Upgrades.RowSource(entry))
 		row.delta:SetText(ns.Upgrades.DeltaText(entry))
 	end
 	popup.pool:HideFrom(n + 1)
 	popup.empty:SetShown(n == 0)
+	popup.empty:SetText(Filtered() and "No items with the filters in use" or "No items for this slot")
+	popup.hint:SetShown(n > 0)
 	popup:SetSize(WIDTH, 34 + math.max(n, 1) * ROW + 34)
 end
 
@@ -168,8 +213,15 @@ local function MakeCorner(slotFrame, slot)
 	corner:SetScript("OnEnter", function(self)
 		self.over = true
 		PaintCorner(self)
-		local lines = self.state == "best" and { "Best item for this slot." }
-			or self.better and { "Better items: " .. self.better } or nil
+		-- the list is as long as the pop-up: a full one means "that many or more"
+		local lines
+		if self.state == "best" then
+			lines = { "Best item for this slot." }
+		elseif self.better then
+			lines = { "Better items: " .. self.better .. (self.better >= TOP and " or more" or "") }
+		else
+			lines = { Filtered() and "No better item with the filters in use." or "No better item in the lists." }
+		end
 		UI.TextTooltip(self, "Upgrades", lines)
 	end)
 	corner:SetScript("OnLeave", function(self)
@@ -200,11 +252,11 @@ end
 -- "best", "better" (and how many) or nil for one corner.
 local function State(corner, list)
 	local link = FrameLink(corner)
-	if link and Call("Rank", link) == 1 then return "best" end
+	if link and Call("Rank", link, Player()) == 1 then return "best" end
 	local better = 0
 	if PAIRED[corner.slot] then
 		-- two rings: each frame against its own ring, not against the weaker one
-		local score = link and Call("Score", link)
+		local score = link and Call("Score", link, Player())
 		for _, entry in ipairs(list) do
 			if not entry.worn and (type(score) ~= "number" or (entry.score or 0) > score) then better = better + 1 end
 		end

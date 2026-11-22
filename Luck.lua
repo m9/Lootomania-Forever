@@ -13,9 +13,13 @@ local LOST_KEEP = 40 -- names kept in "lost to"
 
 ns.Defaults({ luck = {} })
 
+-- upWins: wins of an item that was an upgrade when it was won
 local function Blank()
-	return { rolls = 0, wins = 0, sum = 0, hundreds = 0, ones = 0, need = 0, greed = 0, pass = 0, dry = 0, longestDry = 0, lostTo = {} }
+	return { rolls = 0, wins = 0, upWins = 0, sum = 0, hundreds = 0, ones = 0, need = 0, greed = 0, pass = 0, dry = 0, longestDry = 0,
+		lostTo = {} }
 end
+
+local ENOUGH = 10 -- rolls before the average is called good or bad
 
 local function Key(key)
 	return key or (ns.player and ns.player.full) or "?"
@@ -88,6 +92,13 @@ local function Count(drop)
 	if me.w then
 		s.wins = s.wins + 1
 		s.dry = 0
+		-- an upgrade at the time it was won: the wins that mattered, apart from the rest
+		local Gear = ns.Gear
+		local item = drop.link or drop.id
+		if item and Gear and Gear.Compare and Gear.PlayerContext then
+			local ok, c = pcall(Gear.Compare, item, Gear.PlayerContext())
+			if ok and type(c) == "table" and type(c.delta) == "number" and c.delta > 0 then s.upWins = s.upWins + 1 end
+		end
 	else
 		s.dry = s.dry + 1
 		s.longestDry = math.max(s.longestDry, s.dry)
@@ -113,13 +124,18 @@ ns.Listen("LOOT_DECIDED", Count)
 
 local view = {}
 
+-- { key, label, what it counts }
 local TILES = {
-	{ "rolls", "Rolls" }, { "wins", "Wins" }, { "rate", "Win rate" }, { "avg", "Average roll" },
-	{ "hundreds", "100s" }, { "ones", "1s" }, { "best", "Best roll" }, { "worst", "Worst roll" },
-	{ "need", "Need" }, { "greed", "Greed" }, { "pass", "Pass" }, { "dry", "Dry streak" },
+	{ "rolls", "Rolls", "Your Need and Greed rolls in group loot." },
+	{ "wins", "Wins", "Rolls you won. Upgrades: the wins that were an upgrade when you won them." },
+	{ "rate", "Win rate", "Wins out of your rolls, Greed rolls counted." },
+	{ "avg", "Average roll", "Even luck is 50.5. Green or red after " .. ENOUGH .. " rolls." },
+	{ "hundreds", "100s", "Rolls of 100." }, { "ones", "1s", "Rolls of 1." }, { "best", "Best roll" }, { "worst", "Worst roll" },
+	{ "need", "Need", "Times you chose Need." }, { "greed", "Greed", "Times you chose Greed." }, { "pass", "Pass", "Times you passed." },
+	{ "dry", "Dry streak", "Rolls since your last win." },
 }
 
-local function Tile(parent, label, width, height)
+local function Tile(parent, label, width, height, tip)
 	local box = UI.Box(parent)
 	box:SetSize(width, height)
 	box.label = UI.Text(box, "GameFontHighlightSmall", C.MUTED)
@@ -129,6 +145,11 @@ local function Tile(parent, label, width, height)
 	box.value:SetPoint("BOTTOMLEFT", 10, 10)
 	box.note = UI.Text(box, "GameFontHighlightSmall", C.FAINT)
 	box.note:SetPoint("BOTTOMRIGHT", -10, 12)
+	if tip then
+		box:EnableMouse(true)
+		box:SetScript("OnEnter", function(self) UI.TextTooltip(self, label, { tip }) end)
+		box:SetScript("OnLeave", UI.HideTooltip)
+	end
 	return box
 end
 
@@ -152,10 +173,12 @@ local function Fill()
 	}
 	for id, tile in pairs(view.tiles) do tile.value:SetText(text[id]) end
 	view.tiles.dry.note:SetText("Longest: " .. s.longestDry)
+	view.tiles.wins.note:SetText(s.wins > 0 and ("Upgrades: " .. (s.upWins or 0)) or "")
 	view.tiles.avg.note:SetText("Expected: " .. EXPECTED)
-	UI.Color(view.tiles.avg.value, not s.avg and C.GOLD or (s.avg >= EXPECTED and C.GREEN or C.RED))
+	-- a few rolls say nothing: the colour waits for enough of them
+	UI.Color(view.tiles.avg.value, (not s.avg or s.rolls < ENOUGH) and C.GOLD or (s.avg >= EXPECTED and C.GREEN or C.RED))
 
-	view.bar:Set((s.avg or 0) / 100, s.avg and s.avg < EXPECTED and C.RED or C.GREEN)
+	view.bar:Set((s.avg or 0) / 100, (not s.avg or s.rolls < ENOUGH) and C.GOLD or (s.avg < EXPECTED and C.RED or C.GREEN))
 	view.barText:SetText(s.avg and ("Average roll: %.1f"):format(s.avg) or "Average roll: -")
 
 	local lost = L.LostTo(key, 6)
@@ -203,7 +226,7 @@ local function BuildTab(panel)
 	local tileWidth, tileHeight = (width - gap * 3) / 4, 66
 	view.tiles = {}
 	for i, def in ipairs(TILES) do
-		local tile = Tile(panel, def[2], tileWidth, tileHeight)
+		local tile = Tile(panel, def[2], tileWidth, tileHeight, def[3])
 		local col, line = (i - 1) % 4, math.floor((i - 1) / 4)
 		tile:SetPoint("TOPLEFT", col * (tileWidth + gap), -36 - line * (tileHeight + gap))
 		view.tiles[def[1]] = tile

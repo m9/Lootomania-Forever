@@ -100,7 +100,6 @@ end)
 --   "CONTEXT_CHANGED"   class, spec, level or faction used for ranking changed
 --   "GEAR_CHANGED"      the player's equipped gear changed
 --   "HUNTS_CHANGED"     tracked, completed or removed upgrades changed
---   "WISHLIST_CHANGED"  the wishlist changed
 --   "SETTINGS_CHANGED"  key: a setting changed
 --   "HISTORY_CHANGED"   loot history got a new run, drop or roll
 
@@ -169,8 +168,9 @@ end)
 
 ns.commands = {}
 
-function ns.Command(word, help, run)
-	ns.commands[word] = { run = run, help = help }
+-- tool: a command for testing or for making the data, left out of the short help.
+function ns.Command(word, help, run, tool)
+	ns.commands[word] = { run = run, help = help, tool = tool or nil }
 end
 
 SLASH_LOOTOMANIA1 = "/lm"
@@ -190,15 +190,17 @@ SlashCmdList.LOOTOMANIA = function(text)
 	end
 end
 
-ns.Command("help", "List commands", function()
+ns.Command("help", "List commands. Also: all", function(rest)
+	local all = (rest or ""):lower():match("^all") ~= nil
 	local words = {}
 	for word in pairs(ns.commands) do words[#words + 1] = word end
 	table.sort(words)
 	ns.Print("Commands")
 	ns.Print("/lm - open or close")
 	for _, word in ipairs(words) do
-		ns.Print("/lm " .. word .. " - " .. (ns.commands[word].help or ""))
+		if all or not ns.commands[word].tool then ns.Print("/lm " .. word .. " - " .. (ns.commands[word].help or "")) end
 	end
+	if not all then ns.Print("Testing and data commands: /lm help all") end
 end)
 
 ns.Command("debug", "Debug messages on/off", function()
@@ -206,7 +208,7 @@ ns.Command("debug", "Debug messages on/off", function()
 	ns.Print("Debug: " .. (ns.db.debug and "on" or "off"))
 	-- events this client does not have
 	if ns.db.debug and ns.noEvent then ns.Print("No event: " .. table.concat(ns.noEvent, ", ")) end
-end)
+end, true)
 
 -- Small helpers -----------------------------------------------------------------------
 
